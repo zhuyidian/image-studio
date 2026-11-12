@@ -11,7 +11,8 @@
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "admin": "tsx scripts/admin.ts",
-    "backup": "tsx scripts/backup.ts"
+    "backup": "tsx scripts/backup.ts",
+    "mail:preview": "tsx scripts/mail-preview.ts"
   },
   "dependencies": {
     "cookie-parser": "^1.4.7",
@@ -21,6 +22,7 @@
     "helmet": "^8.1.0",
     "lucide-react": "^0.468.0",
     "multer": "^2.0.2",
+    "nodemailer": "^10.5.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "sharp": "^0.35.5",
@@ -31,6 +33,7 @@
     "@types/express": "^5.0.5",
     "@types/multer": "^2.0.0",
     "@types/node": "^24.10.0",
+    "@types/nodemailer": "^7.0.3",
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.2",
     "@vitejs/plugin-react": "^5.1.0",

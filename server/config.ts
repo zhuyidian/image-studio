@@ -18,6 +18,11 @@ const envSchema = z.object({
   HIGH_IMAGE_CREDITS: z.coerce.number().int().positive().max(100000).default(24),
   ALLOW_REGISTRATION: z.enum(['true', 'false']).optional(),
   SIGNUP_CREDITS: z.coerce.number().int().nonnegative().max(100000).optional(),
+  EMAIL_VERIFICATION_REQUIRED: z.enum(['true', 'false']).optional(),
+  MAIL_TRANSPORT: z.enum(['disabled', 'file', 'smtp']).optional(),
+  SMTP_HOST: z.string().trim().min(1).optional(), SMTP_PORT: z.coerce.number().int().min(1).max(65535).default(587),
+  SMTP_SECURE: z.enum(['true', 'false']).default('false'), SMTP_USER: z.string().optional(), SMTP_PASS: z.string().optional(),
+  SMTP_FROM: z.email().optional(),
   MAX_ACTIVE_TASKS_PER_USER: z.coerce.number().int().min(1).max(20).default(2),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(10).default(2),
   PAYMENT_PROVIDER: z.enum(['disabled', 'epay']).default('disabled'),
@@ -29,6 +34,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   const e = envSchema.parse(environment);
   const production = e.NODE_ENV === 'production';
   const origin = new URL(e.APP_ORIGIN).origin;
+  const mailTransport = e.MAIL_TRANSPORT ?? (e.NODE_ENV === 'development' ? 'file' : 'disabled');
+  if (production && mailTransport === 'file') throw new Error('生产环境不能使用本地邮件文件模式');
+  if (mailTransport === 'smtp' && (!e.SMTP_HOST || !e.SMTP_FROM)) throw new Error('SMTP 地址和发信邮箱未配置');
   if (production && !origin.startsWith('https://')) throw new Error('生产 APP_ORIGIN 必须使用 HTTPS');
   if (e.IMAGE_PROVIDER === 'newapi' && (!e.NEW_API_BASE_URL || !e.NEW_API_KEY)) throw new Error('New API 地址与密钥未配置');
   if (e.IMAGE_PROVIDER === 'newapi' && new URL(e.NEW_API_BASE_URL!).protocol !== 'https:' && production) throw new Error('生产 New API 连接必须使用 HTTPS');
@@ -40,12 +48,14 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   return { ...e, production, origin, publicOrigin: new URL(e.PUBLIC_ORIGIN || origin).origin,
     dataDir: path.resolve(e.DATA_DIR), registration: e.ALLOW_REGISTRATION === 'true' || (!production && e.ALLOW_REGISTRATION !== 'false'),
     signupCredits: e.SIGNUP_CREDITS ?? (production ? 0 : 36),
+    mailTransport, emailVerificationRequired: e.EMAIL_VERIFICATION_REQUIRED ? e.EMAIL_VERIFICATION_REQUIRED === 'true' : e.NODE_ENV !== 'test',
   };
 }
 export type Config = ReturnType<typeof loadConfig>;
 export function publicConfig(c: Config, models: PublicImageModel[] = []): PublicConfig {
   const defaultModel = models.find(m => m.isDefault) ?? models[0];
   return { name: c.APP_NAME, provider: c.IMAGE_PROVIDER, registration: c.registration, signupCredits: c.signupCredits,
+    emailVerificationRequired: c.emailVerificationRequired, mailDeliveryAvailable: c.mailTransport !== 'disabled', passwordResetAvailable: c.mailTransport !== 'disabled',
     model: defaultModel?.name ?? '暂无可用模型', models, pricing: defaultModel?.prices.generate ?? { standard: c.STANDARD_IMAGE_CREDITS, high: c.HIGH_IMAGE_CREDITS },
     paymentEnabled: c.PAYMENT_PROVIDER !== 'disabled', demoAvailable: !c.production && c.IMAGE_PROVIDER === 'mock', packages: [
       { id: 'starter', name: '灵感补给', cents: 1990, credits: 200, subtitle: '偶尔创作，轻松开始' },

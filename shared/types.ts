@@ -19,7 +19,7 @@ export interface ModelTaskSnapshot {
   catalogModelId: string; name: string; adapter: 'images-v1'; qualityMap: Record<Quality, UpstreamQuality>; sendSize: boolean;
   sizeNotice?: string;
 }
-export interface User { id: string; email: string; name: string; role: 'user' | 'admin'; credits: number; frozen: number }
+export interface User { id: string; email: string; name: string; role: 'user' | 'admin'; credits: number; frozen: number; status: 'active' | 'disabled'; emailVerified: boolean }
 export interface Asset { id: string; url: string; width: number; height: number; kind: 'reference' | 'mask' | 'output' }
 export interface Task {
   id: string; prompt: string; mode: TaskMode; status: TaskStatus; size: ImageSize; quality: Quality;
@@ -34,6 +34,7 @@ export interface PublicConfig {
   name: string; provider: 'mock' | 'newapi'; registration: boolean; signupCredits: number;
   model: string; models: PublicImageModel[]; pricing: Record<Quality, number>; paymentEnabled: boolean; demoAvailable: boolean; packages: Package[];
   adminTestModels?: PublicImageModel[];
+  emailVerificationRequired: boolean; mailDeliveryAvailable: boolean; passwordResetAvailable: boolean;
 }
 export type VoucherStatus = 'unused' | 'redeemed' | 'expired' | 'revoked';
 export interface VoucherPerson { id: string; name: string; email: string }
@@ -66,3 +67,5 @@ export interface AdminOverview {
   totalOrders: number; paidOrders: number; totalAvailableCredits: number; totalFrozenCredits: number;
   recentUsers: AdminUser[];
 }
+export interface AccountPolicy { registration: boolean; signupCredits: number; emailVerificationRequired: boolean; revision: number }
+export interface AccountSettingsResponse { policy: AccountPolicy; mail: { transport: 'disabled' | 'file' | 'smtp'; available: boolean; from: string | null } }

@@ -28,13 +28,19 @@ Compose 不包含现有 New API，它通过你填写的 HTTPS 地址连接，不
 
 ## 首次生产管理员
 
-首次可先在受限访问环境中临时开放注册，注册自己的账户后关闭公开注册，再提升该账户。容器中没有 devDependencies，使用编译后的 Store 进行一次本地管理：
+首次在受限访问环境中配置好 SMTP，临时开放注册，验证邮箱并注册自己的账户，然后提升为管理员。容器包含编译后的管理命令，无需安装开发依赖：
 
 ```bash
-docker compose exec app node --input-type=module -e "import {Store} from './dist/server/store.js';const s=new Store('/app/data/studio.sqlite');const u=s.findUser('YOUR-ADMIN-EMAIL');if(!u)throw Error('Register first');s.db.prepare('UPDATE users SET role=? WHERE id=?').run('admin',u.id);s.audit(u.id,'admin.promote.cli',u.id,'Container administrator promotion');s.close();"
+docker compose exec app node dist/scripts/admin.js registration true
+# 在网站完成邮箱验证并注册后：
+docker compose exec app node dist/scripts/admin.js promote YOUR-ADMIN-EMAIL
+# 暂停公开注册（或以后在后台“注册与邮箱”关闭）：
+docker compose exec app node dist/scripts/admin.js registration false
 ```
 
 不要在公共环境保留演示账号或使用已公开的固定管理员密码。生产构建不提供演示登录接口。
+
+`ALLOW_REGISTRATION` 只在账户设置首次初始化时使用；数据库已有设置后，修改环境变量不会覆盖后台选项。上面的服务器终端命令可以处理尚未设置首位管理员、无法进入后台时的注册开关。它不会跳过邮箱验证，不修改已有用户积分或密码；请仅在受信任的服务器终端操作。
 
 ## 必须完成的实际联调
 
@@ -42,7 +48,7 @@ docker compose exec app node --input-type=module -e "import {Store} from './dist
 - **计费**：用实际成本测算积分价格，避免把示例积分包直接作为正式商业报价。
 - **支付**：确认是 EPay 兼容商户，还是微信 V3/支付宝 RSA2 官方直连。当前适配仅覆盖前者。先小额检查签名、重复通知、金额、付款方式、到账、退款与对账。
 - **结果不明**：演练上游超时、应用重启和人工核对，确认不会无条件重试生成。
-- **公开注册**：当前没有邮件验证、找回密码、验证码或成熟反滥用能力。公开运营前补齐；生产默认关闭注册并无免费积分。
+- **公开注册**：已实现邮箱验证、找回密码、用户禁用、IP/邮箱基础频率限制。当前只有本地测试邮件，生产必须配置并验证 SMTP，另按实际流量补验证码和风控。生产初始设置默认关闭注册、赠送积分为 0；之后通过后台“注册与邮箱”管理。详见 [账户与邮件](ACCOUNTS.md)。
 - **图片内容**：当前上传只验证格式/尺寸并重新编码；并未接入独立内容审核服务。应接入你的审核策略，不能只依赖上游拒绝。
 - **数据维护**：当前作品与原图持续保留，尚无用户删除/过期清理功能，需要制定保留策略并实现删除入口。
 
@@ -65,7 +71,7 @@ npm run backup -- verify "备份目录的完整路径"
 
 - 单 API/Worker 实例 + 单 SQLite 数据库 + 本地持久卷，适合小规模验证。
 - 单机文件存储尚未接入 S3/OSS/R2。跨服务器部署前应增加对象存储适配。
-- 已有多模型目录、能力选择与独立定价；当前只接同步 Images 协议。缺少供应商异步任务轮询、自动对账、退款、团队席位、订阅续期和邮件系统。
+- 已有多模型目录、能力选择与独立定价，以及验证码/密码重置邮件能力；当前只接同步 Images 协议。缺少供应商异步任务轮询、自动对账、退款、团队席位和订阅续期。真实 SMTP 仍需配置验收。
 - 生产应用可通过 `npm run build` 检查；本机 Docker 守护进程未开启时无法验证镜像构建，应在目标环境再次执行。
 
 ## 扩展顺序

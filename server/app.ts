@@ -13,11 +13,14 @@ import { ImageCatalog, imageModelSchema } from './catalog.js';
 import { MediaStore } from './media.js';
 import { hashPassword, verifyPassword, sessionToken } from './auth.js';
 import { checkoutUrl, processNotification } from './payments.js';
+import { Accounts } from './accounts.js';
+import { createMailDelivery, type MailDelivery } from './mail.js';
 
 declare global { namespace Express { interface Request { studioUser?: User } } }
 const cookieName = 'studio_session';
 const loginSchema = z.object({ email: z.email().max(254).transform(v => v.trim().toLowerCase()), password: z.string().min(10).max(128) });
-const registerSchema = loginSchema.extend({ name: z.string().trim().min(1).max(32) });
+const registerSchema = loginSchema.extend({ name: z.string().trim().min(1).max(32), verificationCode: z.string().regex(/^\d{6}$/).optional() });
+const emailSchema = z.object({ email: z.email().max(254).transform(v => v.trim().toLowerCase()) });
 const taskSchema = z.object({ prompt: z.string().trim().min(2).max(4000), mode: z.enum(['generate', 'edit', 'inpaint']),
   size: z.enum(['1024x1024', '1536x1024', '1024x1536']), quality: z.enum(['standard', 'high']), count: z.number().int().min(1).max(4),
   referenceId: z.uuid().optional(), maskId: z.uuid().optional(), modelId: z.uuid(),
@@ -25,9 +28,14 @@ const taskSchema = z.object({ prompt: z.string().trim().min(2).max(4000), mode: 
   adminTest: z.boolean().optional(),
 }).strict();
 
-export function createApp(config: Config, store: Store, media: MediaStore) {
+export function createApp(config: Config, store: Store, media: MediaStore, mail: MailDelivery = createMailDelivery(config)) {
   const catalog = new ImageCatalog(store, config);
-  const siteConfig = () => publicConfig(config, catalog.publicModels());
+  const accounts = new Accounts(store, config, mail);
+  const siteConfig = () => {
+    const policy = accounts.policy();
+    return { ...publicConfig(config, catalog.publicModels()), registration: policy.registration && (!policy.emailVerificationRequired || mail.available), signupCredits: policy.signupCredits,
+      emailVerificationRequired: policy.emailVerificationRequired, mailDeliveryAvailable: mail.available, passwordResetAvailable: mail.available };
+  };
   const app = express();
   app.disable('x-powered-by');
   if (config.TRUST_PROXY_HOPS) app.set('trust proxy', config.TRUST_PROXY_HOPS);
@@ -43,9 +51,10 @@ export function createApp(config: Config, store: Store, media: MediaStore) {
   });
   const requireUser = (req: Request, _res: Response, next: NextFunction) => req.studioUser ? next() : next(new AppError(401, '请先登录', 'UNAUTHENTICATED'));
   const requireAdmin = (req: Request, _res: Response, next: NextFunction) => req.studioUser?.role === 'admin' ? next() : next(new AppError(403, '需要管理员权限'));
+  const requireVerified = (req: Request, _res: Response, next: NextFunction) => { if (!req.studioUser) return next(new AppError(401, '请先登录')); try { accounts.requireVerified(req.studioUser); next(); } catch (error) { next(error); } };
   const authLimit = rateLimit({ windowMs: 15 * 60000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: '尝试次数较多，请稍后再试' } });
-  function signIn(res: Response, user: User) {
-    const token = sessionToken(); store.createSession(user.id, token);
+  function signIn(res: Response, user: User, expectedAuthVersion?: number) {
+    const token = sessionToken(); store.createSession(user.id, token, expectedAuthVersion);
     res.cookie(cookieName, token, { httpOnly: true, secure: config.production, sameSite: 'strict', maxAge: 7 * 86400000, path: '/' });
     return res.json({ user });
   }
@@ -53,10 +62,9 @@ export function createApp(config: Config, store: Store, media: MediaStore) {
   app.get('/api/config', (req, res) => res.json({ ...siteConfig(), ...(req.studioUser?.role === 'admin' ? { adminTestModels: catalog.publicModels(true) } : {}) }));
   app.get('/api/auth/me', (req, res) => res.json({ user: req.studioUser ?? null }));
   app.post('/api/auth/register', authLimit, async (req, res) => {
-    if (!config.registration) throw new AppError(403, '暂未开放注册，请联系管理员');
     const input = registerSchema.parse(req.body);
     const password = await hashPassword(input.password);
-    const user = store.createUser(input.email, input.name, password, config.signupCredits);
+    const user = accounts.register({ ...input, passwordHash: password });
     signIn(res.status(201), user);
   });
   app.post('/api/auth/login', authLimit, async (req, res) => {
@@ -64,7 +72,32 @@ export function createApp(config: Config, store: Store, media: MediaStore) {
     const user = store.findUser(input.email);
     const fallback = 'scrypt:4b1b08b8100b66f7cb8f8cc4e8780c81:' + '00'.repeat(64);
     if (!await verifyPassword(input.password, user?.password ?? fallback) || !user) throw new AppError(401, '邮箱或密码不正确');
-    signIn(res, store.user(user.id));
+    if (user.status !== 'active') throw new AppError(403, '账户已被禁用，请联系管理员', 'ACCOUNT_DISABLED');
+    signIn(res, store.user(user.id), user.auth_version);
+  });
+  app.post('/api/auth/register-code', authLimit, async (req, res) => {
+    const { email } = emailSchema.parse(req.body);
+    if (!accounts.policy().registration) throw new AppError(403, '暂未开放注册');
+    await accounts.requestCode(email, 'register');
+    res.json({ message: '如果此邮箱可以注册，验证码将发送至该邮箱。请等待60秒后再申请。' });
+  });
+  app.post('/api/auth/verify-email/request', requireUser, authLimit, async (req, res) => {
+    await accounts.requestCode(req.studioUser!.email, 'verify', req.studioUser!.id);
+    res.json({ message: '验证码已申请，请查看邮箱；60秒内无需重复申请。' });
+  });
+  app.post('/api/auth/verify-email/confirm', requireUser, authLimit, (req, res) => {
+    const { code } = z.object({ code: z.string().regex(/^\d{6}$/) }).parse(req.body);
+    res.json({ user: accounts.verify(req.studioUser!, code) });
+  });
+  app.post('/api/auth/password-reset/request', authLimit, async (req, res) => {
+    const { email } = emailSchema.parse(req.body);
+    await accounts.requestReset(email);
+    res.json({ message: '如果账户存在且可用，重置链接将发送至该邮箱，请查看邮件。' });
+  });
+  app.post('/api/auth/password-reset/confirm', authLimit, async (req, res) => {
+    const { token, password } = z.object({ token: z.string().regex(/^[a-f0-9-]{36}\.[A-Za-z0-9_-]{43}$/i), password: z.string().min(10).max(128) }).parse(req.body);
+    accounts.resetPassword(token, await hashPassword(password));
+    res.clearCookie(cookieName, { httpOnly: true, secure: config.production, sameSite: 'strict', path: '/' }).json({ ok: true, message: '密码已重置，请使用新密码重新登录' });
   });
   app.post('/api/auth/demo', authLimit, async (_req, res) => {
     if (config.production || config.IMAGE_PROVIDER !== 'mock') throw new AppError(404, '此功能不可用');
@@ -76,7 +109,7 @@ export function createApp(config: Config, store: Store, media: MediaStore) {
     res.clearCookie(cookieName, { httpOnly: true, secure: config.production, sameSite: 'strict', path: '/' }).json({ ok: true });
   });
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024, files: 1, fields: 1 } });
-  app.post('/api/assets', requireUser, upload.single('file'), async (req, res) => {
+  app.post('/api/assets', requireUser, requireVerified, upload.single('file'), async (req, res) => {
     if (!req.file) throw new AppError(400, '请选择图片');
     const kind = z.enum(['reference', 'mask']).parse(req.body.kind ?? 'reference');
     const asset = await media.save(req.studioUser!.id, req.file.buffer, kind);
@@ -92,7 +125,7 @@ export function createApp(config: Config, store: Store, media: MediaStore) {
   });
   app.get('/api/tasks', requireUser, (req, res) => res.json({ tasks: store.tasks(req.studioUser!.id) }));
   app.get('/api/tasks/:id', requireUser, (req, res) => res.json({ task: store.taskView(store.taskRow(String(req.params.id), req.studioUser!.id)) }));
-  app.post('/api/tasks', requireUser, (req, res) => {
+  app.post('/api/tasks', requireUser, requireVerified, (req, res) => {
     const input = taskSchema.parse(req.body);
     if (input.adminTest && req.studioUser!.role !== 'admin') throw new AppError(403, '仅管理员可测试未开放模型');
     const key = z.uuid().parse(req.get('Idempotency-Key'));
@@ -116,11 +149,11 @@ export function createApp(config: Config, store: Store, media: MediaStore) {
     res.status(201).json({ task, user: store.user(req.studioUser!.id) });
   });
   app.get('/api/wallet', requireUser, (req, res) => res.json({ user: store.user(req.studioUser!.id), ledger: store.ledger(req.studioUser!.id) }));
-  app.post('/api/wallet/redeem', requireUser, authLimit, (req, res) => {
+  app.post('/api/wallet/redeem', requireUser, requireVerified, authLimit, (req, res) => {
     const { code } = z.object({ code: z.string().trim().min(8).max(100) }).parse(req.body);
     res.json({ user: store.redeem(req.studioUser!.id, code) });
   });
-  app.post('/api/payments/orders', requireUser, authLimit, (req, res) => {
+  app.post('/api/payments/orders', requireUser, requireVerified, authLimit, (req, res) => {
     if (config.PAYMENT_PROVIDER === 'disabled') throw new AppError(503, '在线支付尚未开启，可以使用积分兑换码');
     const input = z.object({ packageId: z.string(), method: z.enum(['alipay', 'wxpay']) }).parse(req.body);
     const pack = publicConfig(config).packages.find(p => p.id === input.packageId);
@@ -137,6 +170,13 @@ export function createApp(config: Config, store: Store, media: MediaStore) {
     res.type('text').send('success');
   });
   app.get('/api/admin', requireUser, requireAdmin, (_req, res) => res.json(store.adminOverview()));
+  app.get('/api/admin/account-settings', requireUser, requireAdmin, (_req, res) => res.json({ policy: accounts.policy(), mail: accounts.mailStatus() }));
+  app.put('/api/admin/account-settings', requireUser, requireAdmin, (req, res) => res.json({ policy: accounts.updatePolicy(req.body, req.studioUser!.id), mail: accounts.mailStatus() }));
+  app.put('/api/admin/users/:id/status', requireUser, requireAdmin, (req, res) => {
+    const id = z.uuid().parse(req.params.id);
+    const input = z.object({ status: z.enum(['active', 'disabled']), reason: z.string().trim().min(2).max(300) }).strict().parse(req.body);
+    res.json({ user: store.setUserStatus(id, input.status, req.studioUser!.id, input.reason) });
+  });
   app.get('/api/admin/models', requireUser, requireAdmin, (_req, res) => res.json({ models: catalog.list(), provider: config.IMAGE_PROVIDER }));
   app.post('/api/admin/models', requireUser, requireAdmin, (req, res) => res.status(201).json({ model: catalog.save(req.body, req.studioUser!.id) }));
   app.put('/api/admin/models/:id', requireUser, requireAdmin, (req, res) => {
@@ -147,8 +187,8 @@ export function createApp(config: Config, store: Store, media: MediaStore) {
   const adminPageSchema = z.object({ page: z.coerce.number().int().min(1).max(1000000).default(1) });
   const adminUserId = (req: Request) => z.uuid().parse(req.params.id);
   app.get('/api/admin/users', requireUser, requireAdmin, (req, res) => {
-    const query = adminPageSchema.extend({ q: z.string().trim().max(254).default(''), role: z.enum(['all', 'user', 'admin']).default('all') }).parse(req.query);
-    res.json(store.adminUsers(query.q, query.role, query.page));
+    const query = adminPageSchema.extend({ q: z.string().trim().max(254).default(''), role: z.enum(['all', 'user', 'admin']).default('all'), status: z.enum(['all', 'active', 'disabled']).default('all') }).parse(req.query);
+    res.json(store.adminUsers(query.q, query.role, query.page, query.status));
   });
   app.get('/api/admin/users/:id', requireUser, requireAdmin, (req, res) => res.json(store.adminUserDetail(adminUserId(req))));
   app.get('/api/admin/users/:id/ledger', requireUser, requireAdmin, (req, res) => {

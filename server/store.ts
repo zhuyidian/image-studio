@@ -8,8 +8,8 @@ export class AppError extends Error {
 export const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const now = () => new Date().toISOString();
 const voucherStatusSql = "CASE WHEN v.redeemed_by IS NOT NULL THEN 'redeemed' WHEN v.revoked_at IS NOT NULL THEN 'revoked' WHEN v.expires_at <= ? THEN 'expired' ELSE 'unused' END";
-type UserRow = { id: string; email: string; name: string; role: 'user' | 'admin'; credits: number; frozen: number; password: string; created_at: string };
-const userColumns = 'id,email,name,role,credits,frozen,created_at';
+export type UserRow = { id: string; email: string; name: string; role: 'user' | 'admin'; credits: number; frozen: number; password: string; created_at: string; status: User['status']; email_verified_at: string | null; auth_version: number };
+const userColumns = 'id,email,name,role,credits,frozen,created_at,status,email_verified_at,auth_version';
 const pageInfo = (total: number, requestedPage: number) => {
   const pageSize = 20;
   const page = Math.min(Math.max(1, Math.trunc(requestedPage)), Math.max(1, Math.ceil(total / pageSize)));
@@ -78,6 +78,12 @@ export class Store {
     `);
     // Add metadata without changing existing code hashes, expiry dates or redemption records.
     this.tx(() => {
+      const userFields = new Set((this.db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).map(c => c.name));
+      for (const [name, type] of [['status', "TEXT NOT NULL DEFAULT 'active'"], ['email_verified_at', 'TEXT'], ['auth_version', 'INTEGER NOT NULL DEFAULT 1']]) if (!userFields.has(name)) this.db.exec(`ALTER TABLE users ADD COLUMN ${name} ${type}`);
+      // Existing administrators were provisioned locally; preserve their access during rollout.
+      if (!userFields.has('email_verified_at')) this.db.exec("UPDATE users SET email_verified_at=created_at WHERE role='admin'");
+      const sessionFields = new Set((this.db.prepare('PRAGMA table_info(sessions)').all() as { name: string }[]).map(c => c.name));
+      if (!sessionFields.has('auth_version')) this.db.exec('ALTER TABLE sessions ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 1');
       const columns = new Set((this.db.prepare('PRAGMA table_info(vouchers)').all() as { name: string }[]).map(c => c.name));
       const additions = [
         ['id', 'TEXT'], ['suffix', 'TEXT'], ['note', "TEXT NOT NULL DEFAULT ''"],
@@ -105,24 +111,28 @@ export class Store {
   user(id: string): User {
     const u = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
     if (!u) throw new AppError(401, '请先登录', 'UNAUTHENTICATED');
-    return { id: u.id, email: u.email, name: u.name, role: u.role, credits: u.credits, frozen: u.frozen };
+    return { id: u.id, email: u.email, name: u.name, role: u.role, credits: u.credits, frozen: u.frozen, status: u.status, emailVerified: Boolean(u.email_verified_at) };
   }
-  createUser(email: string, name: string, password: string, credits = 0, role = 'user'): User {
-    return this.tx(() => {
+  insertUser(email: string, name: string, password: string, credits = 0, role = 'user', emailVerified = false): User {
       if (this.findUser(email)) throw new AppError(409, '此邮箱已注册');
       const id = randomUUID();
-      this.db.prepare('INSERT INTO users (id,email,name,password,role,credits,created_at) VALUES (?,?,?,?,?,?,?)').run(id, email, name, password, role, credits, now());
+      this.db.prepare('INSERT INTO users (id,email,name,password,role,credits,created_at,email_verified_at) VALUES (?,?,?,?,?,?,?,?)').run(id, email, name, password, role, credits, now(), emailVerified ? now() : null);
       if (credits) this.entry(id, 'welcome', credits, 0, '新用户体验积分', `welcome:${id}`);
       return this.user(id);
-    });
   }
-  createSession(userId: string, token: string) {
+  createUser(email: string, name: string, password: string, credits = 0, role = 'user', emailVerified = false): User {
+    return this.tx(() => this.insertUser(email, name, password, credits, role, emailVerified));
+  }
+  createSession(userId: string, token: string, expectedAuthVersion?: number) {
+    const u = this.db.prepare('SELECT status,auth_version FROM users WHERE id=?').get(userId) as { status: string; auth_version: number } | undefined;
+    if (!u || u.status !== 'active') throw new AppError(403, '账户已被禁用，请联系管理员', 'ACCOUNT_DISABLED');
+    if (expectedAuthVersion !== undefined && expectedAuthVersion !== u.auth_version) throw new AppError(401, '登录信息已变化，请重新登录');
     this.db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(now());
-    this.db.prepare('INSERT INTO sessions VALUES (?,?,?)').run(hash(token), userId, new Date(Date.now() + 7 * 86400000).toISOString());
+    this.db.prepare('INSERT INTO sessions (token_hash,user_id,expires_at,auth_version) VALUES (?,?,?,?)').run(hash(token), userId, new Date(Date.now() + 7 * 86400000).toISOString(), u.auth_version);
   }
   session(token: string | undefined): User | undefined {
     if (!token) return;
-    const s = this.db.prepare('SELECT user_id FROM sessions WHERE token_hash = ? AND expires_at > ?').get(hash(token), now()) as { user_id: string } | undefined;
+    const s = this.db.prepare("SELECT s.user_id FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.status='active' AND s.auth_version=u.auth_version").get(hash(token), now()) as { user_id: string } | undefined;
     return s ? this.user(s.user_id) : undefined;
   }
   revokeSession(token: string) { this.db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hash(token)); }
@@ -160,6 +170,7 @@ export class Store {
   createTask(input: { userId: string; prompt: string; mode: TaskMode; size: ImageSize; quality: Quality; count: number; model: string; provider: string; unitPrice: number; referenceId?: string; maskId?: string; key: string; maxActive: number; snapshot?: ModelTaskSnapshot; requestFingerprint?: string; adminTest?: boolean }) {
     const fingerprint = input.requestFingerprint ?? hash(JSON.stringify([input.prompt, input.mode, input.size, input.quality, input.count, input.model, input.referenceId ?? null, input.maskId ?? null]));
     return this.tx(() => {
+      if (this.user(input.userId).status !== 'active') throw new AppError(403, '账户已被禁用', 'ACCOUNT_DISABLED');
       const existing = this.db.prepare('SELECT * FROM tasks WHERE user_id=? AND idempotency_key=?').get(input.userId, input.key) as TaskRow | undefined;
       if (existing) {
         if (existing.fingerprint !== fingerprint) throw new AppError(409, '重复提交标识已用于另一项任务');
@@ -184,7 +195,7 @@ export class Store {
   }
   claimTask(): TaskRow | undefined {
     return this.tx(() => {
-      const t = this.db.prepare("SELECT * FROM tasks WHERE status='queued' ORDER BY created_at LIMIT 1").get() as TaskRow | undefined;
+      const t = this.db.prepare("SELECT t.* FROM tasks t JOIN users u ON u.id=t.user_id WHERE t.status='queued' AND u.status='active' ORDER BY t.created_at,t.rowid LIMIT 1").get() as TaskRow | undefined;
       if (!t) return;
       this.db.prepare("UPDATE tasks SET status='running',started_at=? WHERE id=? AND status='queued'").run(now(), t.id);
       return this.taskRow(t.id);
@@ -318,7 +329,7 @@ export class Store {
     });
   }
   private adminUserView(row: Omit<UserRow, 'password'>): AdminUser {
-    return { id: row.id, email: row.email, name: row.name, role: row.role, credits: row.credits, frozen: row.frozen, createdAt: row.created_at };
+    return { id: row.id, email: row.email, name: row.name, role: row.role, credits: row.credits, frozen: row.frozen, createdAt: row.created_at, status: row.status, emailVerified: Boolean(row.email_verified_at) };
   }
   private requireAdminUserRecord(userId: string): AdminUser {
     const row = this.db.prepare(`SELECT ${userColumns} FROM users WHERE id=?`).get(userId) as Omit<UserRow, 'password'> | undefined;
@@ -332,18 +343,43 @@ export class Store {
     const recentUsers = (this.db.prepare(`SELECT ${userColumns} FROM users ORDER BY created_at DESC,rowid DESC LIMIT 5`).all() as Omit<UserRow, 'password'>[]).map(r => this.adminUserView(r));
     return { ...users, ...tasks, ...orders, recentUsers };
   }
-  adminUsers(query = '', role: User['role'] | 'all' = 'all', requestedPage = 1): PageResult<AdminUser> {
+  adminUsers(query = '', role: User['role'] | 'all' = 'all', requestedPage = 1, status: User['status'] | 'all' = 'all'): PageResult<AdminUser> {
     const clauses: string[] = []; const params: string[] = [];
     if (query.trim()) {
       clauses.push('(instr(lower(name),lower(?))>0 OR instr(lower(email),lower(?))>0 OR instr(lower(id),lower(?))>0)');
       params.push(query.trim(), query.trim(), query.trim());
     }
     if (role !== 'all') { clauses.push('role=?'); params.push(role); }
+    if (status !== 'all') { clauses.push('status=?'); params.push(status); }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const { n } = this.db.prepare(`SELECT COUNT(*) AS n FROM users ${where}`).get(...params) as { n: number };
     const pagination = pageInfo(n, requestedPage);
     const rows = this.db.prepare(`SELECT ${userColumns} FROM users ${where} ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?`).all(...params, pagination.pageSize, (pagination.page - 1) * pagination.pageSize) as Omit<UserRow, 'password'>[];
     return { ...pagination, items: rows.map(r => this.adminUserView(r)) };
+  }
+  setUserStatus(userId: string, status: User['status'], actorId: string, reason: string): AdminUser {
+    return this.tx(() => {
+      const actor = this.user(actorId); const target = this.requireAdminUserRecord(userId);
+      if (actor.role !== 'admin' || actor.status !== 'active') throw new AppError(403, '需要管理员权限');
+      if (actorId === userId && status === 'disabled') throw new AppError(400, '不能禁用当前登录的管理员');
+      if (target.status === status) return target;
+      if (target.role === 'admin' && status === 'disabled') {
+        const { n } = this.db.prepare("SELECT COUNT(*) AS n FROM users WHERE role='admin' AND status='active'").get() as { n: number };
+        if (n <= 1) throw new AppError(400, '必须保留至少一位可用管理员');
+      }
+      this.db.prepare('UPDATE users SET status=?,auth_version=auth_version+1 WHERE id=?').run(status, userId);
+      this.db.prepare('DELETE FROM sessions WHERE user_id=?').run(userId);
+      if (status === 'disabled') {
+        const queued = this.db.prepare("SELECT id,reserved FROM tasks WHERE user_id=? AND status='queued'").all(userId) as { id: string; reserved: number }[];
+        for (const t of queued) {
+          this.db.prepare("UPDATE tasks SET status='failed',finished_at=?,error=? WHERE id=? AND status='queued'").run(now(), '账户被禁用，任务尚未提交上游，冻结积分已退回', t.id);
+          this.db.prepare('UPDATE users SET credits=credits+?,frozen=frozen-? WHERE id=?').run(t.reserved, t.reserved, userId);
+          this.entry(userId, 'settle', t.reserved, -t.reserved, '账户禁用，未开始任务的冻结积分已退回', `settle:${t.id}`, t.id);
+        }
+      }
+      this.audit(actorId, status === 'disabled' ? 'user.disable' : 'user.enable', userId, reason);
+      return this.requireAdminUserRecord(userId);
+    });
   }
   adminUserDetail(userId: string): AdminUserDetail {
     const user = this.requireAdminUserRecord(userId);

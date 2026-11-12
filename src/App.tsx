@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowRight, Check, CircleHelp, Coins, Compass, Images, LayoutGrid, LogOut, Menu, PanelLeftClose, Settings2, Sparkles, X } from 'lucide-react';
-import { api, post } from './api';
+import { api, post, ApiError } from './api';
 import { Studio, type StudioPage } from './components/Studio';
 import { AuthModal } from './components/AuthModal';
 import { Wallet } from './components/Wallet';
 import { Admin } from './components/Admin';
 import { Modal } from './components/Modal';
+import { PasswordResetModal, VerifyEmailModal } from './components/AccountModals';
 import type { PublicConfig, Task, User } from '../shared/types';
 
 type Page = StudioPage | 'wallet' | 'admin';
@@ -17,6 +18,12 @@ export default function App() {
   const [auth, setAuth] = useState(false); const [help, setHelp] = useState(false); const [mobileMenu, setMobileMenu] = useState(false);
   const [message, setMessage] = useState(''); const [loadError, setLoadError] = useState(''); const [offline, setOffline] = useState(false);
   const [resetToken, setResetToken] = useState(0);
+  const [passwordReset, setPasswordReset] = useState(() => new URLSearchParams(location.hash.slice(1)).get('reset') ?? '');
+  const [verifyEmail, setVerifyEmail] = useState(false);
+  useEffect(() => {
+    const readReset = () => { const token = new URLSearchParams(location.hash.slice(1)).get('reset'); if (token) { setPasswordReset(token); history.replaceState({}, '', location.pathname + location.search); } };
+    readReset(); window.addEventListener('hashchange', readReset); return () => window.removeEventListener('hashchange', readReset);
+  }, []);
   const toast = useCallback((text: string) => setMessage(text), []);
   const refreshConfig = useCallback(async () => {
     const latest = await api<PublicConfig>('/config');
@@ -37,8 +44,16 @@ export default function App() {
     if (!user?.id) { setTasks([]); return; }
     let disposed = false;
     const refresh = async () => {
-      try { const [t, u] = await Promise.all([api<{ tasks: Task[] }>('/tasks'), api<{ user: User | null }>('/auth/me')]); if (!disposed) { setTasks(t.tasks); setUser(u.user); setOffline(false); } }
-      catch { if (!disposed) setOffline(true); }
+      try {
+        const u = await api<{ user: User | null }>('/auth/me');
+        if (!u.user) { if (!disposed) { setUser(null); setTasks([]); setOffline(false); setVerifyEmail(false); toast('登录已失效，请重新登录'); } return; }
+        const t = await api<{ tasks: Task[] }>('/tasks');
+        if (!disposed) { setTasks(t.tasks); setUser(u.user); setOffline(false); }
+      }
+      catch (error) {
+        if (!disposed && error instanceof ApiError && error.status === 401) { setUser(null); setTasks([]); setOffline(false); setVerifyEmail(false); }
+        else if (!disposed) setOffline(true);
+      }
     };
     void refresh(); const timer = setInterval(() => void refresh(), 3000);
     window.addEventListener('focus', refresh);
@@ -58,12 +73,15 @@ export default function App() {
     <div className="main-column"><header className="topbar"><div><button className="icon-button mobile-toggle" aria-label="打开导航菜单" onClick={() => setMobileMenu(true)}><Menu size={20} /></button><span>我的空间</span><span className="breadcrumb-slash">/</span><strong>{pageNames[page]}</strong></div><div className="topbar-right">{user ? <button className="top-balance" onClick={() => navigate('wallet')}><Coins size={15} /><strong>{user.credits}</strong><span>积分</span><span className="top-plus">+</span></button> : <button className="button secondary small" onClick={() => setAuth(true)}>登录 / 注册<ArrowRight size={14} /></button>}<button className="icon-button top-help" aria-label="查看帮助" onClick={() => setHelp(true)}><CircleHelp size={19} /></button></div></header>
       {config.provider === 'mock' && <div className="demo-banner"><span className="status-dot" />本地演示模式<span>示例图片用于验证流程，不调用真实模型。</span></div>}
       {offline && <div className="notice connection-notice" role="status">连接暂时中断，正在重新连接。已经提交的任务会在后台继续执行。</div>}
+      {user && config.emailVerificationRequired && !user.emailVerified && <div className="email-verify-banner"><span>请先验证邮箱，再开始创作或兑换积分。你的历史作品仍可查看。</span><button className="text-button" onClick={() => setVerifyEmail(true)}>验证邮箱</button></div>}
       <div hidden={!['studio', 'works', 'inspiration'].includes(page)}><Studio config={config} user={user} tasks={tasks} resetToken={resetToken} page={['studio', 'works', 'inspiration'].includes(page) ? page as StudioPage : 'studio'} onNavigate={navigate} onLogin={() => setAuth(true)} onRefreshConfig={refreshConfig} onSubmitted={(task, u) => { setTasks(previous => [task, ...previous.filter(t => t.id !== task.id)]); setUser(u); }} toast={toast} /></div>
       {page === 'wallet' && <Wallet config={config} user={user} onUser={setUser} onLogin={() => setAuth(true)} toast={toast} />}
       {page === 'admin' && (user?.role === 'admin' ? <Admin key={user.id} brand={config.name} toast={toast} onModelsChanged={() => { void refreshConfig().catch(e => toast((e as Error).message)); }} /> : <section className="page-content"><div className="empty-works"><h2>需要管理员权限</h2><p>请使用管理员账户登录后查看。</p>{!user && <button className="button primary" onClick={() => setAuth(true)}>登录</button>}</div></section>)}
       <footer className="site-footer"><span>© {new Date().getFullYear()} {config.name}</span><span>一点灵感，无限可能<span className="footer-star">✳</span></span></footer>
     </div>
-    {auth && <AuthModal config={config} onClose={() => setAuth(false)} onSuccess={u => { setTasks([]); setUser(u); setAuth(false); toast(`欢迎，${u.name}`); }} />}
+    {auth && !passwordReset && <AuthModal config={config} onClose={() => setAuth(false)} onSuccess={u => { setTasks([]); setUser(u); setAuth(false); toast(`欢迎，${u.name}`); }} />}
+    {passwordReset && <PasswordResetModal token={passwordReset} onClose={() => setPasswordReset('')} onSuccess={() => { setPasswordReset(''); setUser(null); setTasks([]); setAuth(true); toast('密码已重置，请使用新密码登录'); }} />}
+    {verifyEmail && user && <VerifyEmailModal user={user} mailAvailable={config.mailDeliveryAvailable} onClose={() => setVerifyEmail(false)} onSuccess={u => { setUser(u); setVerifyEmail(false); toast('邮箱已验证，可以继续创作'); }} />}
     {help && <Modal title="让创作更顺手" onClose={() => setHelp(false)}><div className="help-content"><h3>从一个画面开始</h3><p>文字生图适合从零创作；参考图编辑可以调整已有图片；局部重绘需要先上传图片，再涂抹要修改的区域。每种创作方式只展示支持该操作的模型。</p><h3>选择创作模型</h3><p>默认推荐模型可以直接使用。切换模型后，画幅、质量、数量和价格会按支持范围调整，请在提交前核对。</p><h3>积分如何计算？</h3><p>积分按所选模型、任务类型、质量与张数计算，以创作按钮旁显示的费用为准。提交时冻结，成功按交付张数结算；明确失败释放积分。结果不明的任务会暂时冻结，等待核对。已提交任务保留当时的模型与单价。</p><h3>页面关闭后怎么办？</h3><p>任务在服务端执行。再次登录后，可以在“我的作品”中查看进度和下载结果。</p><h3>关于本地演示</h3><p>演示模式输出的是程序绘制的示意图，用来验证账户、积分和任务流程，不代表真实模型的图片质量或编辑效果。</p><h3>项目与许可</h3><p>部分画布坐标与缩放逻辑改编自 MIT 开源项目 GPT Image Playground，完整许可见项目 THIRD_PARTY_NOTICES.md。</p></div></Modal>}
     {message && <div className="toast" role="status"><Check size={17} />{message}<button aria-label="关闭提示" onClick={() => setMessage('')}><X size={14} /></button></div>}
   </div>;

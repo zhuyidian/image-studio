@@ -1,19 +1,28 @@
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import type { AdminTask, AdminUserDetail, LedgerEntry, PageResult, Voucher } from '../../../shared/types';
 import { Modal } from '../Modal';
 import { useAdminResource } from './useAdminResource';
 import { AdminPagination, AdminRefresh, adminTime, TaskBadge } from './AdminControls';
+import { api } from '../../api';
+import '../accounts.css';
 
 type RecordTab = 'ledger' | 'vouchers' | 'tasks';
 const tabs: { id: RecordTab; label: string }[] = [{ id: 'ledger', label: '积分流水' }, { id: 'vouchers', label: '兑换记录' }, { id: 'tasks', label: '任务记录' }];
-export function UserDetail({ id, onClose }: { id: string; onClose: () => void }) {
+export function UserDetail({ id, onClose, onChanged, toast }: { id: string; onClose: () => void; onChanged: () => void; toast: (message: string) => void }) {
   const { data, error, loading, refresh } = useAdminResource<AdminUserDetail>(`/admin/users/${id}`);
   const [tab, setTab] = useState<RecordTab>('ledger'); const [recordVersion, setRecordVersion] = useState(0);
-  return <Modal title="用户详情" wide onClose={onClose}>
+  const [changing, setChanging] = useState(false); const [reason, setReason] = useState(''); const [busy, setBusy] = useState(false); const [statusError, setStatusError] = useState('');
+  async function changeStatus(event: FormEvent) {
+    event.preventDefault(); if (!data || busy) return; setBusy(true); setStatusError('');
+    try { const status = data.user.status === 'disabled' ? 'active' : 'disabled'; await api(`/admin/users/${id}/status`, { method: 'PUT', body: JSON.stringify({ status, reason: reason.trim() }) }); setChanging(false); await refresh(); onChanged(); setRecordVersion(v => v + 1); toast(status === 'disabled' ? '账户已禁用，登录会话已撤销' : '账户已恢复，需要重新登录'); }
+    catch (e) { setStatusError((e as Error).message); } finally { setBusy(false); }
+  }
+  return <Modal title="用户详情" wide onClose={() => { if (!busy) onClose(); }}>
     {error && <p className="form-error" role="alert">{error}</p>}
     {data ? <>
       <div className="admin-profile"><span className="admin-profile-avatar">{data.user.name.slice(0, 1)}</span><div><h3>{data.user.name}<span className={`admin-role ${data.user.role}`}>{data.user.role === 'admin' ? '管理员' : '普通用户'}</span></h3><p>{data.user.email}</p><small className="admin-mono">{data.user.id}</small></div><AdminRefresh loading={loading} onRefresh={() => { void refresh(); setRecordVersion(v => v + 1); }} /></div>
       <p className="admin-profile-date">注册于 {adminTime(data.user.createdAt)}（北京时间）</p>
+      <div className="user-status-panel"><header><h3>{data.user.status === 'disabled' ? '账户已禁用' : '账户正常'} · {data.user.emailVerified ? '邮箱已验证' : '邮箱未验证'}</h3><button className="text-button" disabled={busy} onClick={() => { setChanging(!changing); setReason(''); setStatusError(''); }}>{changing ? '取消操作' : data.user.status === 'disabled' ? '恢复账户' : '禁用账户'}</button></header>{changing && <form onSubmit={changeStatus}><p>{data.user.status === 'disabled' ? '恢复后用户可以重新登录，原登录会话不会恢复。' : '禁用会使全部登录失效，取消未提交上游的排队任务并退回冻结积分。已发往上游的任务继续按结果结算。当前管理员不能禁用自己。'}</p><textarea aria-label="账户操作原因" required minLength={2} maxLength={300} value={reason} onChange={e => setReason(e.target.value)} placeholder="填写操作原因，便于以后核对" disabled={busy} />{statusError && <p className="form-error" role="alert">{statusError}</p>}<div className="modal-actions"><button className="button secondary" type="button" disabled={busy} onClick={() => setChanging(false)}>取消</button><button className="button primary" disabled={busy || reason.trim().length < 2}>{busy ? '处理中…' : data.user.status === 'disabled' ? '确认恢复' : '确认禁用'}</button></div></form>}</div>
       <div className="admin-detail-stats"><div><span>可用积分</span><strong>{data.user.credits.toLocaleString()}</strong></div><div><span>冻结积分</span><strong>{data.user.frozen.toLocaleString()}</strong></div><div><span>累计任务</span><strong>{data.stats.totalTasks.toLocaleString()}</strong></div><div><span>已结算积分</span><strong>{data.stats.chargedCredits.toLocaleString()}</strong></div></div>
       <div className="admin-record-tabs" role="group" aria-label="用户记录类型">{tabs.map(item => <button className={tab === item.id ? 'selected' : ''} aria-pressed={tab === item.id} key={item.id} onClick={() => setTab(item.id)}>{item.label}<span>{item.id === 'ledger' ? data.stats.ledgerEntries : item.id === 'vouchers' ? data.stats.redeemedVouchers : data.stats.totalTasks}</span></button>)}</div>
       <UserRecords key={`${id}:${tab}:${recordVersion}`} userId={id} tab={tab} />

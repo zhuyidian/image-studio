@@ -1,17 +1,18 @@
 import { useEffect, useState } from 'react';
-import { ArrowRight, ClipboardList, Cpu, LayoutDashboard, Ticket, Users } from 'lucide-react';
+import { ArrowRight, ClipboardList, Cpu, LayoutDashboard, Mail, Ticket, Users } from 'lucide-react';
 import type { AdminOverview } from '../../shared/types';
 import { VoucherManager } from './VoucherManager';
 import { UserManager } from './admin/UserManager';
 import { UserDetail } from './admin/UserDetail';
 import { TaskManager } from './admin/TaskManager';
 import { ModelManager } from './admin/ModelManager';
+import { AccountSettings } from './admin/AccountSettings';
 import { useAdminResource } from './admin/useAdminResource';
 import { AdminRefresh, adminTime } from './admin/AdminControls';
 import './admin/admin.css';
 
-type AdminTab = 'overview' | 'users' | 'vouchers' | 'tasks' | 'models';
-const tabs = [{ id: 'overview', label: '概览', icon: LayoutDashboard }, { id: 'users', label: '用户管理', icon: Users }, { id: 'models', label: '模型管理', icon: Cpu }, { id: 'vouchers', label: '兑换码管理', icon: Ticket }, { id: 'tasks', label: '任务管理', icon: ClipboardList }] as const;
+type AdminTab = 'overview' | 'users' | 'vouchers' | 'tasks' | 'models' | 'accounts';
+const tabs = [{ id: 'overview', label: '概览', icon: LayoutDashboard }, { id: 'users', label: '用户管理', icon: Users }, { id: 'models', label: '模型管理', icon: Cpu }, { id: 'vouchers', label: '兑换码管理', icon: Ticket }, { id: 'tasks', label: '任务管理', icon: ClipboardList }, { id: 'accounts', label: '注册与邮箱', icon: Mail }] as const;
 function currentTab(): AdminTab {
   const value = new URLSearchParams(location.search).get('adminTab');
   return tabs.some(tab => tab.id === value) ? value as AdminTab : 'overview';
@@ -20,6 +21,7 @@ export function Admin({ brand, toast, onModelsChanged }: { brand: string; toast:
   const [tab, setTab] = useState<AdminTab>(currentTab);
   const [selectedUser, setSelectedUser] = useState<string | null>(null);
   const [tasksVersion, setTasksVersion] = useState(0);
+  const [usersVersion, setUsersVersion] = useState(0);
   const [taskStatus, setTaskStatus] = useState<'all' | 'uncertain'>('all');
   const { data, error, loading, refresh } = useAdminResource<AdminOverview>('/admin');
   useEffect(() => { const onPop = () => { setTab(currentTab()); setSelectedUser(null); }; window.addEventListener('popstate', onPop); return () => window.removeEventListener('popstate', onPop); }, []);
@@ -38,10 +40,11 @@ export function Admin({ brand, toast, onModelsChanged }: { brand: string; toast:
       <div className="section-heading"><h2>最新注册</h2><button className="text-button" onClick={() => navigate('users')}>查看全部用户<ArrowRight size={14} /></button></div>
       <div className="admin-table-wrap"><table className="admin-table recent-users-table"><thead><tr><th scope="col">用户</th><th scope="col">角色</th><th scope="col">注册时间（北京时间）</th><th scope="col">操作</th></tr></thead><tbody>{data?.recentUsers.map(user => <tr key={user.id}><td><strong>{user.name}</strong><small>{user.email}</small></td><td><span className={`admin-role ${user.role}`}>{user.role === 'admin' ? '管理员' : '普通用户'}</span></td><td>{adminTime(user.createdAt)}</td><td><button className="text-button" onClick={() => setSelectedUser(user.id)}>查看详情</button></td></tr>)}{!data?.recentUsers.length && <tr><td colSpan={4} className="admin-empty">{loading ? '正在加载…' : error ? '加载失败，请刷新重试。' : '暂无用户。'}</td></tr>}</tbody></table></div>
     </section>}
-    {tab === 'users' && <UserManager onSelect={setSelectedUser} />}
+    {tab === 'users' && <UserManager key={usersVersion} onSelect={setSelectedUser} />}
     {tab === 'models' && <ModelManager toast={toast} onChanged={onModelsChanged} />}
+    {tab === 'accounts' && <AccountSettings toast={toast} onChanged={onModelsChanged} />}
     {tab === 'vouchers' && <VoucherManager brand={brand} toast={toast} />}
     {tab === 'tasks' && <TaskManager key={tasksVersion} initialStatus={taskStatus} onUser={setSelectedUser} onChanged={() => void refresh()} toast={toast} />}
-    {selectedUser && <UserDetail key={selectedUser} id={selectedUser} onClose={() => setSelectedUser(null)} />}
+    {selectedUser && <UserDetail key={selectedUser} id={selectedUser} onClose={() => setSelectedUser(null)} onChanged={() => { setUsersVersion(v => v + 1); void refresh(); }} toast={toast} />}
   </section>;
 }

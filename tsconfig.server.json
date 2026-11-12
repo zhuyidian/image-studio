@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "module": "NodeNext", "moduleResolution": "NodeNext", "noEmit": false, "outDir": "dist", "rootDir": ".", "types": ["node"] },
-  "include": ["server", "shared"], "exclude": ["src", "tests", "scripts"]
+  "include": ["server", "shared", "scripts/admin.ts"], "exclude": ["src", "tests", "scripts/backup.ts", "scripts/mail-preview.ts"]
 }
