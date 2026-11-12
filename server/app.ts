@@ -15,6 +15,7 @@ import { hashPassword, verifyPassword, sessionToken } from './auth.js';
 import { checkoutUrl, processNotification } from './payments.js';
 import { Accounts } from './accounts.js';
 import { createMailDelivery, type MailDelivery } from './mail.js';
+import { outputReservationBytes } from './storage.js';
 
 declare global { namespace Express { interface Request { studioUser?: User } } }
 const cookieName = 'studio_session';
@@ -31,6 +32,7 @@ const taskSchema = z.object({ prompt: z.string().trim().min(2).max(4000), mode: 
 export function createApp(config: Config, store: Store, media: MediaStore, mail: MailDelivery = createMailDelivery(config)) {
   const catalog = new ImageCatalog(store, config);
   const accounts = new Accounts(store, config, mail);
+  const storage = media.storage;
   const siteConfig = () => {
     const policy = accounts.policy();
     return { ...publicConfig(config, catalog.publicModels()), registration: policy.registration && (!policy.emailVerificationRequired || mail.available), signupCredits: policy.signupCredits,
@@ -124,6 +126,21 @@ export function createApp(config: Config, store: Store, media: MediaStore, mail:
     res.send(bytes);
   });
   app.get('/api/tasks', requireUser, (req, res) => res.json({ tasks: store.tasks(req.studioUser!.id) }));
+  app.get('/api/storage', requireUser, (req, res) => res.json(storage.usage(req.studioUser!.id)));
+  app.get('/api/works', requireUser, (req, res) => {
+    const query = z.object({ scope: z.enum(['active', 'trash']).default('active'), page: z.coerce.number().int().min(1).max(1000000).default(1), q: z.string().trim().max(254).default(''), status: z.enum(['all', 'active', 'done', 'failed']).default('all') }).parse(req.query);
+    res.json(storage.works(req.studioUser!.id, query.scope, query.page, query.q, query.status));
+  });
+  app.post('/api/works/actions', requireUser, async (req, res) => {
+    const input = z.object({ ids: z.array(z.uuid()).min(1).max(100).refine(ids => new Set(ids).size === ids.length), action: z.enum(['trash', 'restore', 'purge']), confirm: z.boolean().optional() }).strict().parse(req.body);
+    if (input.action === 'purge' && input.confirm !== true) throw new AppError(400, '请先确认永久清除操作');
+    const result = storage.changeWorks(req.studioUser!.id, input.ids, input.action);
+    let cleanup = null;
+    if (input.action === 'purge') {
+      try { cleanup = await storage.cleanup(req.studioUser!.id); } catch { /* Tombstones are committed; a later cleanup safely finishes file removal. */ }
+    }
+    res.json({ ...result, cleanup, storage: storage.usage(req.studioUser!.id) });
+  });
   app.get('/api/tasks/:id', requireUser, (req, res) => res.json({ task: store.taskView(store.taskRow(String(req.params.id), req.studioUser!.id)) }));
   app.post('/api/tasks', requireUser, requireVerified, (req, res) => {
     const input = taskSchema.parse(req.body);
@@ -145,7 +162,7 @@ export function createApp(config: Config, store: Store, media: MediaStore, mail:
     }
     const quote = catalog.quote(input, input.adminTest === true);
     const task = store.createTask({ ...input, ...quote, userId: req.studioUser!.id, key, requestFingerprint,
-      provider: config.IMAGE_PROVIDER, maxActive: config.MAX_ACTIVE_TASKS_PER_USER });
+      provider: config.IMAGE_PROVIDER, maxActive: config.MAX_ACTIVE_TASKS_PER_USER, storageLimitBytes: storage.policy().userLimitMiB * 1024 * 1024, storageReserveBytes: input.count * outputReservationBytes });
     res.status(201).json({ task, user: store.user(req.studioUser!.id) });
   });
   app.get('/api/wallet', requireUser, (req, res) => res.json({ user: store.user(req.studioUser!.id), ledger: store.ledger(req.studioUser!.id) }));
@@ -170,6 +187,16 @@ export function createApp(config: Config, store: Store, media: MediaStore, mail:
     res.type('text').send('success');
   });
   app.get('/api/admin', requireUser, requireAdmin, (_req, res) => res.json(store.adminOverview()));
+  app.get('/api/admin/storage', requireUser, requireAdmin, (req, res) => {
+    const { page } = z.object({ page: z.coerce.number().int().min(1).max(1000000).default(1) }).parse(req.query);
+    res.json(storage.admin(page));
+  });
+  app.put('/api/admin/storage', requireUser, requireAdmin, (req, res) => res.json({ policy: storage.updatePolicy(req.body, req.studioUser!.id) }));
+  app.post('/api/admin/storage/cleanup', requireUser, requireAdmin, async (req, res) => {
+    if (z.object({ confirm: z.literal(true) }).strict().parse(req.body).confirm) {
+      const report = await storage.cleanup(); store.audit(req.studioUser!.id, 'storage.cleanup.admin', 'storage', JSON.stringify(report)); res.json(report);
+    }
+  });
   app.get('/api/admin/account-settings', requireUser, requireAdmin, (_req, res) => res.json({ policy: accounts.policy(), mail: accounts.mailStatus() }));
   app.put('/api/admin/account-settings', requireUser, requireAdmin, (req, res) => res.json({ policy: accounts.updatePolicy(req.body, req.studioUser!.id), mail: accounts.mailStatus() }));
   app.put('/api/admin/users/:id/status', requireUser, requireAdmin, (req, res) => {

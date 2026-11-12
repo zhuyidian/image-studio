@@ -27,6 +27,7 @@ export interface Task {
   createdAt: string; finishedAt: string | null; error: string | null; outputs: Asset[];
   referenceId: string | null; maskId: string | null; modelId: string | null; modelName: string;
   isTest: boolean;
+  deletedAt: string | null; purgeAfter: string | null; purgedAt: string | null;
 }
 export interface LedgerEntry { id: string; kind: string; delta: number; frozenDelta: number; note: string; createdAt: string; taskId: string | null }
 export interface Package { id: string; name: string; cents: number; credits: number; subtitle: string }
@@ -69,3 +70,17 @@ export interface AdminOverview {
 }
 export interface AccountPolicy { registration: boolean; signupCredits: number; emailVerificationRequired: boolean; revision: number }
 export interface AccountSettingsResponse { policy: AccountPolicy; mail: { transport: 'disabled' | 'file' | 'smtp'; available: boolean; from: string | null } }
+export interface StoragePolicy {
+  revision: number; userLimitMiB: number; maxUploadMiB: number; dailyUploadLimit: number;
+  trashRetentionDays: number; workRetentionDays: number; orphanRetentionDays: number;
+}
+export interface StorageUsage {
+  usedBytes: number; reservedBytes: number; limitBytes: number; availableBytes: number; assets: number;
+  trashWorks: number; activeWorks: number; protectedBytes: number; uploadedToday: number; policy: StoragePolicy;
+}
+export interface WorkList extends PageResult<Task> { activeTotal: number; trashTotal: number }
+export interface CleanupReport { movedToTrash: number; purgedWorks: number; removedFiles: number; reclaimedBytes: number; pendingFiles: number }
+export interface StorageAdmin {
+  policy: StoragePolicy; totalBytes: number; reservedBytes: number; assets: number;
+  users: PageResult<{ id: string; name: string; email: string; usedBytes: number; reservedBytes: number; assets: number }>;
+}

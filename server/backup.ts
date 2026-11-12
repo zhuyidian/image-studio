@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { withMediaLock } from './media-lock.js';
 
 interface FileCheck { filename: string; bytes: number; sha256: string }
 interface BackupManifest {
@@ -32,8 +33,14 @@ function checkDatabase(db: DatabaseSync) {
 }
 
 export async function createBackup(dataDirectory: string, backupDirectory: string) {
-  // The SQLite backup API includes committed WAL data. Media files are immutable in this version;
-  // copying exactly the snapshot's asset set produces a restorable database/media pair.
+  return withMediaLock(dataDirectory, () => createBackupLocked(dataDirectory, backupDirectory));
+}
+function activeAssets(db: DatabaseSync) {
+  const columns = db.prepare('PRAGMA table_info(assets)').all() as { name: string }[];
+  return db.prepare(`SELECT filename FROM assets ${columns.some(c => c.name === 'purged_at') ? 'WHERE purged_at IS NULL' : ''} ORDER BY filename`).all() as { filename: string }[];
+}
+async function createBackupLocked(dataDirectory: string, backupDirectory: string) {
+  // The shared lock prevents permanent cleanup removing files from this database snapshot.
   const source = path.resolve(dataDirectory); const destination = path.resolve(backupDirectory);
   if (source === destination || source.startsWith(destination + path.sep)) throw new Error('备份目录不能覆盖数据目录或其父目录');
   await mkdir(destination, { recursive: false });
@@ -41,7 +48,7 @@ export async function createBackup(dataDirectory: string, backupDirectory: strin
   try { await sqliteBackup(live, path.join(destination, 'studio.sqlite')); } finally { live.close(); }
   const snapshot = new DatabaseSync(path.join(destination, 'studio.sqlite'), { readOnly: true });
   let assets: { filename: string }[];
-  try { checkDatabase(snapshot); assets = snapshot.prepare('SELECT filename FROM assets ORDER BY filename').all() as { filename: string }[]; } finally { snapshot.close(); }
+  try { checkDatabase(snapshot); assets = activeAssets(snapshot); } finally { snapshot.close(); }
   await mkdir(path.join(destination, 'media'));
   const media: FileCheck[] = [];
   for (const asset of assets) {
@@ -63,7 +70,7 @@ export async function verifyBackup(directory: string) {
   const snapshot = new DatabaseSync(path.join(root, 'studio.sqlite'), { readOnly: true });
   try {
     checkDatabase(snapshot);
-    const assets = snapshot.prepare('SELECT filename FROM assets ORDER BY filename').all() as { filename: string }[];
+    const assets = activeAssets(snapshot);
     if (new Set(manifest.media.map(file => file.filename)).size !== manifest.media.length || assets.length !== manifest.media.length) throw new Error('图片清单与数据库不一致');
     for (const asset of assets) {
       const expected = manifest.media.find(file => file.filename === asset.filename);

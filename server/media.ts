@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import https from 'node:https';
 import { lookup } from 'node:dns';
@@ -7,13 +7,16 @@ import { BlockList, isIP } from 'node:net';
 import sharp, { type OutputInfo } from 'sharp';
 import type { Asset } from '../shared/types.js';
 import { Store, AppError } from './store.js';
+import { StorageService } from './storage.js';
 
 const maxBytes = 20 * 1024 * 1024;
 export class MediaStore {
   readonly directory: string;
-  constructor(private store: Store, dataDir: string) { this.directory = path.join(dataDir, 'media'); }
-  async save(userId: string, bytes: Buffer, kind: Asset['kind']) {
+  readonly storage: StorageService;
+  constructor(private store: Store, dataDir: string) { this.directory = path.join(dataDir, 'media'); this.storage = new StorageService(store, dataDir); }
+  async save(userId: string, bytes: Buffer, kind: Asset['kind'], sourceTaskId?: string) {
     if (bytes.length > maxBytes) throw new AppError(413, '图片过大，请使用 20MB 以内的图片');
+    if (kind !== 'output') this.storage.checkUpload(userId, bytes.length);
     let result: { data: Buffer; info: OutputInfo };
     try {
       const meta = await sharp(bytes, { limitInputPixels: 25000000 }).metadata();
@@ -33,7 +36,8 @@ export class MediaStore {
     await mkdir(this.directory, { recursive: true });
     const filename = `${randomUUID()}.png`;
     await writeFile(path.join(this.directory, filename), result.data, { flag: 'wx' });
-    return this.store.addAsset(userId, filename, result.info.width, result.info.height, kind);
+    try { return this.storage.recordAsset(userId, filename, result.info.width, result.info.height, kind, result.data.length, sourceTaskId); }
+    catch (error) { await unlink(this.storage.assetPath(filename)).catch(() => undefined); throw error; }
   }
   async read(id: string, userId: string) {
     const a = this.store.asset(id, userId);

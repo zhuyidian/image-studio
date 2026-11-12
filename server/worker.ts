@@ -23,7 +23,7 @@ export class Worker {
           const result = await this.provider.generate(task);
           const assets: Asset[] = [];
           for (const bytes of result.images.slice(0, task.count)) {
-            try { assets.push(await this.media.save(task.user_id, bytes, 'output')); } catch { /* Refunded if another output can be delivered. */ }
+            try { assets.push(await this.media.save(task.user_id, bytes, 'output', task.id)); } catch { /* Refunded if another output can be delivered. */ }
           }
           if (!assets.length) { this.store.markUncertain(task.id); return; }
           this.store.settleTask(task.id, assets, assets.length < task.count ? '部分图片未能交付，未交付部分积分已释放' : null, result.requestId, result.usage);

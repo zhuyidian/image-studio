@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ArrowRight, ClipboardList, Cpu, LayoutDashboard, Mail, Ticket, Users } from 'lucide-react';
+import { ArrowRight, ClipboardList, Cpu, HardDrive, LayoutDashboard, Mail, Ticket, Users } from 'lucide-react';
 import type { AdminOverview } from '../../shared/types';
 import { VoucherManager } from './VoucherManager';
 import { UserManager } from './admin/UserManager';
@@ -7,12 +7,13 @@ import { UserDetail } from './admin/UserDetail';
 import { TaskManager } from './admin/TaskManager';
 import { ModelManager } from './admin/ModelManager';
 import { AccountSettings } from './admin/AccountSettings';
+import { StorageSettings } from './admin/StorageSettings';
 import { useAdminResource } from './admin/useAdminResource';
 import { AdminRefresh, adminTime } from './admin/AdminControls';
 import './admin/admin.css';
 
-type AdminTab = 'overview' | 'users' | 'vouchers' | 'tasks' | 'models' | 'accounts';
-const tabs = [{ id: 'overview', label: '概览', icon: LayoutDashboard }, { id: 'users', label: '用户管理', icon: Users }, { id: 'models', label: '模型管理', icon: Cpu }, { id: 'vouchers', label: '兑换码管理', icon: Ticket }, { id: 'tasks', label: '任务管理', icon: ClipboardList }, { id: 'accounts', label: '注册与邮箱', icon: Mail }] as const;
+type AdminTab = 'overview' | 'users' | 'vouchers' | 'tasks' | 'models' | 'accounts' | 'storage';
+const tabs = [{ id: 'overview', label: '概览', icon: LayoutDashboard }, { id: 'users', label: '用户管理', icon: Users }, { id: 'models', label: '模型管理', icon: Cpu }, { id: 'vouchers', label: '兑换码管理', icon: Ticket }, { id: 'tasks', label: '任务管理', icon: ClipboardList }, { id: 'accounts', label: '注册与邮箱', icon: Mail }, { id: 'storage', label: '存储管理', icon: HardDrive }] as const;
 function currentTab(): AdminTab {
   const value = new URLSearchParams(location.search).get('adminTab');
   return tabs.some(tab => tab.id === value) ? value as AdminTab : 'overview';
@@ -43,6 +44,7 @@ export function Admin({ brand, toast, onModelsChanged }: { brand: string; toast:
     {tab === 'users' && <UserManager key={usersVersion} onSelect={setSelectedUser} />}
     {tab === 'models' && <ModelManager toast={toast} onChanged={onModelsChanged} />}
     {tab === 'accounts' && <AccountSettings toast={toast} onChanged={onModelsChanged} />}
+    {tab === 'storage' && <StorageSettings toast={toast} />}
     {tab === 'vouchers' && <VoucherManager brand={brand} toast={toast} />}
     {tab === 'tasks' && <TaskManager key={tasksVersion} initialStatus={taskStatus} onUser={setSelectedUser} onChanged={() => void refresh()} toast={toast} />}
     {selectedUser && <UserDetail key={selectedUser} id={selectedUser} onClose={() => setSelectedUser(null)} onChanged={() => { setUsersVersion(v => v + 1); void refresh(); }} toast={toast} />}

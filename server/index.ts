@@ -23,6 +23,7 @@ await lock.writeFile(String(process.pid));
 await lock.close();
 const store = new Store(path.join(config.dataDir, 'studio.sqlite'));
 const media = new MediaStore(store, config.dataDir);
+await media.storage.initializeSizes();
 const provider = config.IMAGE_PROVIDER === 'mock' ? new MockProvider() : new NewApiProvider(config, media);
 const worker = new Worker(store, media, { generate(task) {
   if (task.provider !== config.IMAGE_PROVIDER) return Promise.reject(new Error('任务供应商配置已变化，需要人工确认'));
@@ -33,11 +34,20 @@ const server = createApp(config, store, media).listen(config.PORT, config.HOST, 
   console.log(`Image Studio API: http://${config.HOST}:${config.PORT} (${config.IMAGE_PROVIDER})`);
   if (config.IMAGE_PROVIDER === 'mock') console.log('本地模拟模式：不会调用 New API，不产生模型费用。');
 });
+let cleanupRunning = false;
+let cleanupJob: Promise<unknown> | null = null;
+const cleanupTimer = setInterval(() => {
+  if (cleanupRunning) return;
+  cleanupRunning = true;
+  cleanupJob = media.storage.cleanup().catch(() => console.warn('Storage cleanup postponed')).finally(() => { cleanupRunning = false; cleanupJob = null; });
+}, 3600000);
+cleanupTimer.unref();
 let closing = false;
 async function shutdown() {
   if (closing) return; closing = true;
-  server.close();
-  await worker.stop(); store.close();
+  clearInterval(cleanupTimer);
+  const httpStopped = new Promise<void>(resolve => server.close(() => resolve()));
+  await Promise.all([httpStopped, worker.stop(), cleanupJob]); store.close();
   await unlink(lockPath).catch(() => undefined);
   process.exit(0);
 }

@@ -15,7 +15,7 @@ const pageInfo = (total: number, requestedPage: number) => {
   const page = Math.min(Math.max(1, Math.trunc(requestedPage)), Math.max(1, Math.ceil(total / pageSize)));
   return { total, page, pageSize };
 };
-export type AssetRow = { id: string; user_id: string; filename: string; width: number; height: number; kind: Asset['kind'] };
+export type AssetRow = { id: string; user_id: string; filename: string; width: number; height: number; kind: Asset['kind']; byte_size?: number | null; purged_at?: string | null; removed_at?: string | null; source_task_id?: string | null };
 export type TaskRow = {
   id: string; user_id: string; prompt: string; mode: TaskMode; status: Task['status']; size: ImageSize;
   quality: Quality; count: number; model: string; provider: string; reserved: number; unit_price: number; charged: number;
@@ -23,6 +23,7 @@ export type TaskRow = {
   error: string | null; idempotency_key: string; fingerprint: string;
   catalog_model_id: string | null; model_name: string | null; model_config_json: string | null;
   admin_test: number;
+  deleted_at: string | null; purge_after: string | null; purged_at: string | null; storage_reserved: number;
 };
 export type OrderRow = { id: string; user_id: string; cents: number; credits: number; status: string; method: string; provider_trade_no: string | null; created_at: string; expires_at: string };
 
@@ -96,6 +97,11 @@ export class Store {
       const taskColumns = new Set((this.db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map(c => c.name));
       for (const column of ['catalog_model_id', 'model_name', 'model_config_json']) if (!taskColumns.has(column)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${column} TEXT`);
       if (!taskColumns.has('admin_test')) this.db.exec('ALTER TABLE tasks ADD COLUMN admin_test INTEGER NOT NULL DEFAULT 0 CHECK(admin_test IN (0,1))');
+      for (const column of ['deleted_at', 'purge_after', 'purged_at', 'retention_base_at']) if (!taskColumns.has(column)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${column} TEXT`);
+      if (!taskColumns.has('storage_reserved')) this.db.exec('ALTER TABLE tasks ADD COLUMN storage_reserved INTEGER NOT NULL DEFAULT 0');
+      const assetColumns = new Set((this.db.prepare('PRAGMA table_info(assets)').all() as { name: string }[]).map(c => c.name));
+      for (const [name, type] of [['byte_size', 'INTEGER'], ['purged_at', 'TEXT'], ['removed_at', 'TEXT'], ['source_task_id', 'TEXT REFERENCES tasks(id)']]) if (!assetColumns.has(name)) this.db.exec(`ALTER TABLE assets ADD COLUMN ${name} ${type}`);
+      this.db.exec('CREATE INDEX IF NOT EXISTS assets_owner_storage ON assets(user_id,removed_at); CREATE INDEX IF NOT EXISTS tasks_owner_trash ON tasks(user_id,deleted_at,purged_at);');
     });
   }
   close() { this.db.close(); }
@@ -137,13 +143,13 @@ export class Store {
   }
   revokeSession(token: string) { this.db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hash(token)); }
   asset(id: string, userId: string): AssetRow {
-    const a = this.db.prepare('SELECT * FROM assets WHERE id = ? AND user_id = ?').get(id, userId) as AssetRow | undefined;
+    const a = this.db.prepare('SELECT * FROM assets WHERE id = ? AND user_id = ? AND purged_at IS NULL').get(id, userId) as AssetRow | undefined;
     if (!a) throw new AppError(404, '图片不存在或无权访问');
     return a;
   }
-  addAsset(userId: string, filename: string, width: number, height: number, kind: Asset['kind']) {
+  addAsset(userId: string, filename: string, width: number, height: number, kind: Asset['kind'], byteSize?: number, sourceTaskId?: string) {
     const id = randomUUID();
-    this.db.prepare('INSERT INTO assets VALUES (?,?,?,?,?,?,?)').run(id, userId, filename, width, height, kind, now());
+    this.db.prepare('INSERT INTO assets (id,user_id,filename,width,height,kind,created_at,byte_size,source_task_id) VALUES (?,?,?,?,?,?,?,?,?)').run(id, userId, filename, width, height, kind, now(), byteSize ?? null, sourceTaskId ?? null);
     return this.assetView({ id, user_id: userId, filename, width, height, kind });
   }
   assetView(a: AssetRow): Asset { return { id: a.id, url: `/api/assets/${a.id}`, width: a.width, height: a.height, kind: a.kind }; }
@@ -155,19 +161,19 @@ export class Store {
     return row as TaskRow;
   }
   taskView(t: TaskRow): Task {
-    const outputs = this.db.prepare('SELECT a.* FROM assets a JOIN task_assets ta ON ta.asset_id=a.id WHERE ta.task_id=? ORDER BY a.created_at, a.id').all(t.id) as AssetRow[];
+    const outputs = t.purged_at ? [] : this.db.prepare('SELECT a.* FROM assets a JOIN task_assets ta ON ta.asset_id=a.id WHERE ta.task_id=? AND a.purged_at IS NULL ORDER BY a.created_at, a.id').all(t.id) as AssetRow[];
     return { id: t.id, prompt: t.prompt, mode: t.mode, status: t.status, size: t.size, quality: t.quality, count: t.count,
       model: t.model, provider: t.provider, reserved: t.reserved, charged: t.charged, createdAt: t.created_at,
-      finishedAt: t.finished_at, error: t.error, referenceId: t.reference_id, maskId: t.mask_id, modelId: t.catalog_model_id, modelName: t.model_name ?? t.model, isTest: Boolean(t.admin_test), outputs: outputs.map(a => this.assetView(a)) };
+      finishedAt: t.finished_at, error: t.error, referenceId: t.purged_at ? null : t.reference_id, maskId: t.purged_at ? null : t.mask_id, modelId: t.catalog_model_id, modelName: t.model_name ?? t.model, isTest: Boolean(t.admin_test), outputs: outputs.map(a => this.assetView(a)), deletedAt: t.deleted_at, purgeAfter: t.purge_after, purgedAt: t.purged_at };
   }
-  tasks(userId: string) { return (this.db.prepare('SELECT * FROM tasks WHERE user_id=? ORDER BY created_at DESC LIMIT 100').all(userId) as TaskRow[]).map(t => this.taskView(t)); }
+  tasks(userId: string) { return (this.db.prepare('SELECT * FROM tasks WHERE user_id=? AND deleted_at IS NULL AND purged_at IS NULL ORDER BY created_at DESC,rowid DESC LIMIT 100').all(userId) as TaskRow[]).map(t => this.taskView(t)); }
   existingTask(userId: string, key: string, fingerprint: string): Task | undefined {
     const row = this.db.prepare('SELECT * FROM tasks WHERE user_id=? AND idempotency_key=?').get(userId, key) as TaskRow | undefined;
     if (!row) return;
     if (row.fingerprint !== fingerprint) throw new AppError(409, '重复提交标识已用于另一项任务');
     return this.taskView(row);
   }
-  createTask(input: { userId: string; prompt: string; mode: TaskMode; size: ImageSize; quality: Quality; count: number; model: string; provider: string; unitPrice: number; referenceId?: string; maskId?: string; key: string; maxActive: number; snapshot?: ModelTaskSnapshot; requestFingerprint?: string; adminTest?: boolean }) {
+  createTask(input: { userId: string; prompt: string; mode: TaskMode; size: ImageSize; quality: Quality; count: number; model: string; provider: string; unitPrice: number; referenceId?: string; maskId?: string; key: string; maxActive: number; snapshot?: ModelTaskSnapshot; requestFingerprint?: string; adminTest?: boolean; storageLimitBytes?: number; storageReserveBytes?: number }) {
     const fingerprint = input.requestFingerprint ?? hash(JSON.stringify([input.prompt, input.mode, input.size, input.quality, input.count, input.model, input.referenceId ?? null, input.maskId ?? null]));
     return this.tx(() => {
       if (this.user(input.userId).status !== 'active') throw new AppError(403, '账户已被禁用', 'ACCOUNT_DISABLED');
@@ -175,6 +181,12 @@ export class Store {
       if (existing) {
         if (existing.fingerprint !== fingerprint) throw new AppError(409, '重复提交标识已用于另一项任务');
         return this.taskView(existing);
+      }
+      for (const assetId of [input.referenceId, input.maskId].filter(Boolean)) this.asset(assetId!, input.userId);
+      if (input.storageLimitBytes !== undefined) {
+        const used = this.db.prepare('SELECT COALESCE(SUM(COALESCE(byte_size,20971520)),0) AS n FROM assets WHERE user_id=? AND removed_at IS NULL').get(input.userId) as { n: number };
+        const reserved = this.db.prepare('SELECT COALESCE(SUM(storage_reserved),0) AS n FROM tasks WHERE user_id=?').get(input.userId) as { n: number };
+        if (used.n + reserved.n + (input.storageReserveBytes ?? 0) > input.storageLimitBytes) throw new AppError(413, '存储空间不足，请清理回收站或联系管理员增加限额', 'STORAGE_QUOTA_EXCEEDED');
       }
       const active = this.db.prepare("SELECT COUNT(*) AS n FROM tasks WHERE user_id=? AND status IN ('queued','running','uncertain')").get(input.userId) as { n: number };
       if (active.n >= input.maxActive) throw new AppError(429, '进行中的任务较多，请等待完成');
@@ -185,6 +197,7 @@ export class Store {
       this.db.prepare(`INSERT INTO tasks (id,user_id,prompt,mode,status,size,quality,count,model,provider,reserved,unit_price,reference_id,mask_id,idempotency_key,fingerprint,created_at)
         VALUES (?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.userId, input.prompt, input.mode, input.size, input.quality, input.count, input.model, input.provider, cost, input.unitPrice, input.referenceId ?? null, input.maskId ?? null, input.key, fingerprint, now());
       if (input.snapshot) this.db.prepare('UPDATE tasks SET catalog_model_id=?,model_name=?,model_config_json=? WHERE id=?').run(input.snapshot.catalogModelId, input.snapshot.name, JSON.stringify(input.snapshot), id);
+      if (input.storageReserveBytes) this.db.prepare('UPDATE tasks SET storage_reserved=? WHERE id=?').run(input.storageReserveBytes, id);
       if (input.adminTest) {
         this.db.prepare('UPDATE tasks SET admin_test=1 WHERE id=?').run(id);
         this.audit(input.userId, 'model.test.submit', id, JSON.stringify({ modelId: input.snapshot?.catalogModelId, model: input.model, mode: input.mode, reservedCredits: cost }));
@@ -216,7 +229,7 @@ export class Store {
       const refund = t.reserved - charged;
       const status = assets.length === 0 ? 'failed' : assets.length === t.count ? 'succeeded' : 'partial';
       this.db.prepare('UPDATE users SET credits=credits+?,frozen=frozen-? WHERE id=?').run(refund, t.reserved, t.user_id);
-      this.db.prepare('UPDATE tasks SET status=?,charged=?,finished_at=?,error=?,upstream_request_id=?,usage_json=? WHERE id=?').run(status, charged, now(), error, requestId ?? null, usage ? JSON.stringify(usage) : null, id);
+      this.db.prepare('UPDATE tasks SET status=?,charged=?,finished_at=?,error=?,upstream_request_id=?,usage_json=?,storage_reserved=0 WHERE id=?').run(status, charged, now(), error, requestId ?? null, usage ? JSON.stringify(usage) : null, id);
       this.entry(t.user_id, 'settle', refund, -t.reserved, assets.length ? `成功生成 ${assets.length} 张，结算 ${charged} 积分` : '生成失败，释放全部冻结积分', `settle:${id}`, id);
       if (adminAudit) this.audit(adminAudit.actorId, 'task.release', id, adminAudit.note);
       return true;
@@ -372,7 +385,7 @@ export class Store {
       if (status === 'disabled') {
         const queued = this.db.prepare("SELECT id,reserved FROM tasks WHERE user_id=? AND status='queued'").all(userId) as { id: string; reserved: number }[];
         for (const t of queued) {
-          this.db.prepare("UPDATE tasks SET status='failed',finished_at=?,error=? WHERE id=? AND status='queued'").run(now(), '账户被禁用，任务尚未提交上游，冻结积分已退回', t.id);
+          this.db.prepare("UPDATE tasks SET status='failed',finished_at=?,error=?,storage_reserved=0 WHERE id=? AND status='queued'").run(now(), '账户被禁用，任务尚未提交上游，冻结积分已退回', t.id);
           this.db.prepare('UPDATE users SET credits=credits+?,frozen=frozen-? WHERE id=?').run(t.reserved, t.reserved, userId);
           this.entry(userId, 'settle', t.reserved, -t.reserved, '账户禁用，未开始任务的冻结积分已退回', `settle:${t.id}`, t.id);
         }
