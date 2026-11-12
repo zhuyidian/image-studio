@@ -1,0 +1,7 @@
+image.yidianhub.com {
+    encode zstd gzip
+    request_body {
+        max_size 21MB
+    }
+    reverse_proxy app:8787
+}
