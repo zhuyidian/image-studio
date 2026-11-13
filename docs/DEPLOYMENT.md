@@ -8,6 +8,8 @@
 
 ## 选择部署方式
 
+如果现有 HTTPS 由 Docker 容器 `yidian-api-caddy-1` 管理，请使用 [接入现有 Docker Caddy](EXISTING_CADDY.md) 的独立 Compose 文件。此情形不适用下面“宿主机代理访问 127.0.0.1”写法。
+
 ### 已有 Nginx / 宝塔 / Caddy
 
 1. 将本项目放入独立服务器目录，不覆盖 New API。

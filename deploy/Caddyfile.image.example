@@ -1,0 +1,9 @@
+# Add this site block to the existing Caddy configuration; do not replace other sites.
+# Caddy and the image app must share the PROXY_NETWORK configured in .env.production.
+image.yidianhub.com {
+    encode zstd gzip
+    request_body {
+        max_size 21MB
+    }
+    reverse_proxy yidian-image-web:8787
+}

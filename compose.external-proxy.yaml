@@ -1,0 +1,35 @@
+# Use this instead of compose.yaml when HTTPS is handled by an existing Docker proxy.
+# Run with: docker compose --env-file .env.production -f compose.external-proxy.yaml ...
+name: yidian-image
+services:
+  app:
+    image: yidian-image:local
+    build: .
+    init: true
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 8787
+      DATA_DIR: /app/data
+    expose:
+      - "8787"
+    networks:
+      proxy:
+        aliases:
+          - yidian-image-web
+    volumes:
+      - studio-data:/app/data
+    stop_grace_period: 240s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+networks:
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK:?Set PROXY_NETWORK to an existing network shared with Caddy}
+volumes:
+  studio-data:
