@@ -7,7 +7,7 @@
 ## 一、发布流程
 
 - 推送 main、codex 分支或创建 PR：CI 执行 `npm ci`、全部测试、生产构建、Docker 构建与运行检查。
-- 推送版本标签（例如 `v0.1.0`）：先重复版本校验与上述检查，通过后发布 Linux amd64/arm64 镜像。
+- 推送版本标签（例如 `v0.1.0`）：先重复版本校验与上述检查，通过后发布 Linux amd64/arm64 镜像；再按镜像 digest 拉回实际发布的 amd64 镜像，检查启动和重启后的数据持久化，通过后创建 Release。
 - GitHub Actions 自动创建 GitHub Release，附带部署包、SHA256SUMS 和 release-manifest.json。
 - 部署包中的 `YIDIAN_IMAGE` 固定为这次镜像的 `sha256` digest，服务器拉到的是已发布的对应镜像，不随 latest 变化。
 - 发布标签必须与 package.json 的 version 一致；未来发布应先更新 version，再提交并创建新标签。不要移动已发布的版本标签。

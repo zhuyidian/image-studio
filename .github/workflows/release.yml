@@ -76,6 +76,12 @@ jobs:
           const platforms = manifest.manifests.map(m => `${m.platform?.os}/${m.platform?.architecture}`);
           for (const expected of ['linux/amd64', 'linux/arm64']) if (!platforms.includes(expected)) throw new Error(`Missing ${expected}`);
           NODE
+      - name: Verify published image by digest
+        env:
+          RELEASE_IMAGE: ghcr.io/zhuyidian/image-studio@${{ steps.build.outputs.digest }}
+        run: |
+          docker pull "$RELEASE_IMAGE"
+          node scripts/verify-container.mjs "$RELEASE_IMAGE"
 
   release:
     needs: [verify, publish]
