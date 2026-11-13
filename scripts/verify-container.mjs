@@ -8,6 +8,11 @@ const container = `yidian-image-check-${suffix}`;
 const volume = `yidian-image-check-${suffix}`;
 const docker = args => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120000 }).trim();
 let created = false;
+function publishedBase() {
+  const published = docker(['port', container, '8787/tcp']);
+  assert.match(published, /^127\.0\.0\.1:\d+$/);
+  return `http://${published}`;
+}
 async function healthy(base) {
   for (let attempt = 0; attempt < 60; attempt++) {
     try { const r = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(2000) }); if (r.ok && (await r.json()).ok) return; } catch { /* cold start */ }
@@ -20,9 +25,7 @@ try {
   docker(['run', '--detach', '--name', container, '--init', '--publish', '127.0.0.1::8787', '--mount', `source=${volume},target=/app/data`,
     '--env', 'NODE_ENV=production', '--env', 'APP_ORIGIN=https://image.yidianhub.com', '--env', 'PUBLIC_ORIGIN=https://image.yidianhub.com',
     '--env', 'IMAGE_PROVIDER=mock', '--env', 'MAIL_TRANSPORT=disabled', image]);
-  const published = docker(['port', container, '8787/tcp']);
-  assert.match(published, /^127\.0\.0\.1:\d+$/);
-  const base = `http://${published}`;
+  let base = publishedBase();
   await healthy(base);
   assert.notEqual(docker(['exec', container, 'id', '-u']), '0');
   assert.equal((await fetch(base)).status, 200);
@@ -37,7 +40,9 @@ try {
   docker(['exec', container, 'node', 'dist/scripts/admin.js', 'registration', 'false']);
   docker(['exec', container, 'node', '--input-type=module', '-e',
     "import {Store} from './dist/server/store.js';const s=new Store('/app/data/studio.sqlite');try{s.createUser('ci@example.test','CI','not-a-login-credential',123,'admin',true);}finally{s.close();}"]);
-  docker(['restart', '--time', '30', container]); await healthy(base);
+  docker(['restart', '--time', '30', container]);
+  // Docker can allocate a new ephemeral host port when the container restarts.
+  base = publishedBase(); await healthy(base);
   const credits = docker(['exec', container, 'node', '--input-type=module', '-e',
     "import {Store} from './dist/server/store.js';const s=new Store('/app/data/studio.sqlite');try{console.log(s.findUser('ci@example.test').credits);}finally{s.close();}"]);
   assert.equal(credits, '123');
