@@ -8,6 +8,8 @@
 
 ## 选择部署方式
 
+当前已选定 **GitHub Actions 构建、GHCR 发布镜像、服务器拉取指定版本**。仓库为 `zhuyidian/image-studio`，生产部署请按 [GitHub Release 部署流程](GITHUB_RELEASE_DEPLOYMENT.md) 操作；服务器无需上传源码或执行 build。
+
 如果现有 HTTPS 由 Docker 容器 `yidian-api-caddy-1` 管理，请使用 [接入现有 Docker Caddy](EXISTING_CADDY.md) 的独立 Compose 文件。此情形不适用下面“宿主机代理访问 127.0.0.1”写法。
 
 ### 已有 Nginx / 宝塔 / Caddy

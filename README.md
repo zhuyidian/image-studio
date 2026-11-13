@@ -183,6 +183,10 @@ npm audit
 
 ## 部署 image.yidianhub.com
 
+采用 **GitHub Actions → GHCR 版本镜像 → 服务器 pull**。仓库：[zhuyidian/image-studio](https://github.com/zhuyidian/image-studio)，镜像：`ghcr.io/zhuyidian/image-studio`。推送 `v0.1.0` 等匹配 package.json 的版本标签后，工作流先验证测试、生产构建与实际容器运行，再发布 amd64/arm64 镜像、GitHub Release 和固定 digest 的部署包。
+
+服务器使用 Release 中的部署包与 `compose.release.yaml`（无 build 字段），通过现有 `yidian-api-caddy-1` 的 `yidian-api_frontend` 网络服务。完整操作见 [GitHub 版本部署](docs/GITHUB_RELEASE_DEPLOYMENT.md)。New API Key 与 SMTP 授权码只在服务器环境文件配置，不写入 GitHub、镜像或部署包。
+
 参见 [部署说明](docs/DEPLOYMENT.md)。仓库提供 Dockerfile、Compose、Caddy 配置和生产环境示例，**没有自动部署或改动 DNS/现有 New API**。
 
 生产配置必须使用 HTTPS；默认关闭公开注册、默认无赠送积分，无演示登录。单机 SQLite MVP 每个数据库只允许一个 API/Worker 进程，服务锁会拒绝重复实例。横向扩容前应迁移 PostgreSQL、独立队列与对象存储。

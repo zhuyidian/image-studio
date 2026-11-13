@@ -1,0 +1,33 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+
+const tag = process.env.RELEASE_TAG;
+const digest = process.env.IMAGE_DIGEST;
+const commit = process.env.SOURCE_COMMIT;
+if (!/^v\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(tag ?? '')) throw new Error('Invalid release tag');
+if (!/^sha256:[a-f0-9]{64}$/.test(digest ?? '')) throw new Error('Invalid image digest');
+if (!/^[a-f0-9]{40}$/.test(commit ?? '')) throw new Error('Invalid source commit');
+const image = 'ghcr.io/zhuyidian/image-studio';
+const output = path.resolve('release-assets');
+const staging = path.join(output, 'deployment');
+await fs.mkdir(staging, { recursive: true });
+const compose = await fs.readFile('compose.release.yaml', 'utf8');
+const environment = `# Release ${tag}, source ${commit}\nYIDIAN_IMAGE=${image}@${digest}\n` + await fs.readFile('deploy/yidianhub.production.env.example', 'utf8');
+await fs.writeFile(path.join(staging, 'compose.yaml'), compose);
+await fs.writeFile(path.join(staging, 'production.env.example'), environment);
+await fs.copyFile('deploy/Caddyfile.image.example', path.join(staging, 'Caddyfile.image.example'));
+await fs.copyFile('docs/GITHUB_RELEASE_DEPLOYMENT.md', path.join(staging, 'DEPLOY.md'));
+const manifest = { schemaVersion: 1, version: tag, commit, image: `${image}@${digest}`, versionImage: `${image}:${tag}`, platforms: ['linux/amd64', 'linux/arm64'], deployment: 'existing Docker Caddy; yidian-api_frontend', containsSecrets: false };
+await fs.writeFile(path.join(output, 'release-manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+await fs.copyFile(path.join(output, 'release-manifest.json'), path.join(staging, 'release-manifest.json'));
+const archive = `yidian-image-${tag}-deploy.tar.gz`;
+execFileSync('tar', ['-czf', path.join(output, archive), '-C', staging, 'compose.yaml', 'production.env.example', 'Caddyfile.image.example', 'DEPLOY.md', 'release-manifest.json'], { stdio: 'inherit' });
+const sums = [];
+for (const filename of [archive, 'release-manifest.json']) sums.push(`${createHash('sha256').update(await fs.readFile(path.join(output, filename))).digest('hex')}  ${filename}`);
+await fs.writeFile(path.join(output, 'SHA256SUMS'), sums.join('\n') + '\n');
+const notes = `Yidian-Image ${tag}\n\nIndependent user accounts and credits, verified single-image workflows over New API, administration, email verification/password recovery, reference-safe work trash and storage quotas.\n\nSource: ${commit}\nContainer: ${image}:${tag}\nPinned container: ${image}@${digest}\nPlatforms: linux/amd64, linux/arm64\n\nValidation: application tests, production build, container startup, non-root runtime, protected routes, admin CLI and persistent SQLite smoke check. ARM64 image is built but not separately runtime-tested.\n\nDeploy using yidian-image-${tag}-deploy.tar.gz; the server only pulls the prebuilt image. New API and SMTP secrets belong in the server .env.production. First-time GHCR packages may require changing package visibility to public or a server read:packages login.\n\nHTTPS routing, real SMTP delivery and model generation must also be checked in the target server environment. No existing sites or server configuration are changed by this release.\n`;
+await fs.writeFile(path.join(output, 'RELEASE_NOTES.md'), notes);
+console.log(JSON.stringify({ version: tag, archive: path.join(output, archive), image: manifest.image }));
+

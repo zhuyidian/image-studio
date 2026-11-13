@@ -1,5 +1,7 @@
 # 使用服务器现有 Docker Caddy 部署图片站
 
+**当前采用 GitHub Actions 构建版本镜像，服务器仅拉取部署。请优先使用 [GitHub Release 部署流程](GITHUB_RELEASE_DEPLOYMENT.md)。** 下方源码构建步骤保留为手动备选，不是当前生产发布方式。
+
 此方案针对用户已提供的服务器清单：`yidian-api-caddy-1`（`caddy:2.10-alpine`）占用公网 80/443，主站、文章站、New API 均为已有容器。图片站全新数据库上线，不复制本地账号、积分、素材或模型目录。
 
 2026-11-13 用户已提供实际 inspect 结果：Caddy 同时连接 `xboard-go_default`、`yidian-api_frontend`；服务器 `/opt/yidian-api/deploy/Caddyfile` 挂载到容器 `/etc/caddy/Caddyfile`。本次选择 **`yidian-api_frontend`**，图片站不需要加入 xboard 网络。可以直接使用 `deploy/yidianhub.production.env.example`，其中网络、域名、New API 地址和 QQ SMTP 协议参数已经填写，私密 Key、发信账号与授权码仍需在服务器填写。

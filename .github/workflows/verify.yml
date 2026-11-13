@@ -1,0 +1,60 @@
+name: Verify application and container
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        default: ''
+      release_tag:
+        type: string
+        default: ''
+    outputs:
+      commit:
+        value: ${{ jobs.verify.outputs.commit }}
+      version:
+        value: ${{ jobs.verify.outputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      commit: ${{ steps.version.outputs.commit }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Verify version and source
+        id: version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const version = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
+          const tag = process.env.RELEASE_TAG;
+          if (tag && (!/^v\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(tag) || tag !== `v${version}`)) {
+            throw new Error('Release tag must match package.json version');
+          }
+          const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\ncommit=${commit}\n`);
+          NODE
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Build production image
+        run: docker build --tag yidian-image:ci .
+      - name: Verify production runtime and persistent database
+        run: node scripts/verify-container.mjs yidian-image:ci
+

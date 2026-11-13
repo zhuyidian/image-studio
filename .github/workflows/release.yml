@@ -1,0 +1,111 @@
+name: Release container
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag matching package.json, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/verify.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
+      release_tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.commit }}
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Container metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/zhuyidian/image-studio
+          tags: |
+            type=raw,value=v${{ needs.verify.outputs.version }}
+            type=sha,format=long
+          flavor: latest=false
+      - name: Publish multi-platform version
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=image-studio-release
+          cache-to: type=gha,mode=max,scope=image-studio-release
+      - name: Confirm published platforms
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools inspect "ghcr.io/zhuyidian/image-studio@${IMAGE_DIGEST}" --raw > /tmp/image-manifest.json
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const manifest = JSON.parse(fs.readFileSync('/tmp/image-manifest.json', 'utf8'));
+          const platforms = manifest.manifests.map(m => `${m.platform?.os}/${m.platform?.architecture}`);
+          for (const expected of ['linux/amd64', 'linux/arm64']) if (!platforms.includes(expected)) throw new Error(`Missing ${expected}`);
+          NODE
+
+  release:
+    needs: [verify, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare deployment files and release notes
+        env:
+          RELEASE_TAG: v${{ needs.verify.outputs.version }}
+          IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
+          SOURCE_COMMIT: ${{ needs.verify.outputs.commit }}
+        run: node scripts/package-release.mjs
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: v${{ needs.verify.outputs.version }}
+        run: |
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/*.tar.gz release-assets/SHA256SUMS release-assets/release-manifest.json --clobber
+            gh release edit "$RELEASE_TAG" --notes-file release-assets/RELEASE_NOTES.md
+          else
+            gh release create "$RELEASE_TAG" release-assets/*.tar.gz release-assets/SHA256SUMS release-assets/release-manifest.json --verify-tag --title "Yidian-Image $RELEASE_TAG" --notes-file release-assets/RELEASE_NOTES.md
+          fi
+

@@ -6,3 +6,5 @@ data
 .env.*
 test-results
 *.log
+.github
+release-assets

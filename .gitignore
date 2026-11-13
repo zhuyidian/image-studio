@@ -6,3 +6,4 @@ data/
 !.env.example
 *.log
 test-results/
+release-assets/
