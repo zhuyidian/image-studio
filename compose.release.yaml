@@ -31,4 +31,3 @@ networks:
     name: ${PROXY_NETWORK:?Set PROXY_NETWORK to the existing Caddy network}
 volumes:
   studio-data:
-

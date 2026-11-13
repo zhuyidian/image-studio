@@ -108,4 +108,3 @@ jobs:
           else
             gh release create "$RELEASE_TAG" release-assets/*.tar.gz release-assets/SHA256SUMS release-assets/release-manifest.json --verify-tag --title "Yidian-Image $RELEASE_TAG" --notes-file release-assets/RELEASE_NOTES.md
           fi
-

@@ -157,4 +157,3 @@ sudo docker compose --env-file .env.production up -d --no-build --wait --wait-ti
 ## 验证范围
 
 GitHub 上的绿色工作流才代表远程构建/容器检查通过。本地配置解析不代表镜像已发布。版本支持 amd64/arm64 构建，运行烟测在 amd64 runner 上执行，arm64 与实际服务器均需单独验收。发布不会自动登录服务器、修改 Caddy、DNS 或配置真实收款。
-

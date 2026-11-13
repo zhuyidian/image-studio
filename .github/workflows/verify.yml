@@ -57,4 +57,3 @@ jobs:
         run: docker build --tag yidian-image:ci .
       - name: Verify production runtime and persistent database
         run: node scripts/verify-container.mjs yidian-image:ci
-

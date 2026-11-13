@@ -49,4 +49,3 @@ try {
   try { docker(['rm', '--force', container]); } catch { /* only this isolated test container */ }
   if (created) docker(['volume', 'rm', volume]);
 }
-
