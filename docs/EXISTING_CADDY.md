@@ -2,6 +2,8 @@
 
 此方案针对用户已提供的服务器清单：`yidian-api-caddy-1`（`caddy:2.10-alpine`）占用公网 80/443，主站、文章站、New API 均为已有容器。图片站全新数据库上线，不复制本地账号、积分、素材或模型目录。
 
+2026-11-13 用户已提供实际 inspect 结果：Caddy 同时连接 `xboard-go_default`、`yidian-api_frontend`；服务器 `/opt/yidian-api/deploy/Caddyfile` 挂载到容器 `/etc/caddy/Caddyfile`。本次选择 **`yidian-api_frontend`**，图片站不需要加入 xboard 网络。可以直接使用 `deploy/yidianhub.production.env.example`，其中网络、域名、New API 地址和 QQ SMTP 协议参数已经填写，私密 Key、发信账号与授权码仍需在服务器填写。
+
 ## 1. 先确认现有网络与配置来源
 
 在 Ubuntu 服务器终端执行只读检查：
@@ -35,6 +37,21 @@ sudo docker inspect yidian-api-caddy-1 --format '{{range .Mounts}}{{println .Sou
 - `PAYMENT_PROVIDER=disabled`。
 
 生产设置不要使用本机 `127.0.0.1:5173`。配置文件建议权限 600。模型单价环境变量只初始化默认目录，后续在后台调整。
+
+### 已确认服务器的具体操作
+
+将最新源码包上传到 `/home/ubuntu/` 后：
+
+```bash
+sudo mkdir -p /opt/yidian-image
+sudo tar -xzf /home/ubuntu/yidian-image-source-20261113-ready.tar.gz -C /opt/yidian-image
+cd /opt/yidian-image
+sudo cp -n deploy/yidianhub.production.env.example .env.production
+sudo chmod 600 .env.production
+sudo nano .env.production
+```
+
+只填写自己的 `NEW_API_KEY`、`SMTP_USER`、`SMTP_PASS`、`SMTP_FROM`，后两项发信地址应与 QQ SMTP 登录账号一致。不使用本地 `.env` 覆盖生产域名配置。`cp -n` 保留任何已存在的生产配置；如该文件以前已创建，应手工检查网络和域名。
 
 ## 3. 构建并启动单独图片站
 
@@ -74,6 +91,8 @@ curl -fsS https://image.yidianhub.com/api/health
 ```
 
 必须确认 validate 成功后再执行 reload。入口不同时使用实际路径。现有 Caddy 管理该域名证书，图片站不另外申请或绑定 80/443。
+
+对于已确认的服务器，Caddy 配置来源为 `/opt/yidian-api/deploy/Caddyfile`。先确认是否已有 `image.yidianhub.com` 站点，再创建有时间戳的备份，使用 `sudo nano /opt/yidian-api/deploy/Caddyfile` 在现有站点块之外追加图片域名块。所有旧域名块和全局配置保持原样；不要把图片站示例文件直接覆盖到该路径。编辑后先执行上面的 validate，成功才 reload。
 
 ## 5. 全新管理员与模型
 
